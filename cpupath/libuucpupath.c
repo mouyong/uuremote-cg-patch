@@ -110,11 +110,23 @@ static struct ec my_CopyTo(void *self, void *dst) {
 
     if (!self || !dst) return g_orig_CopyTo(self, dst);
 
-    CVPixelBufferRef src   = (CVPixelBufferRef)get_pixelbuffer(self);
-    CVPixelBufferRef dstPB = (CVPixelBufferRef)get_pixelbuffer(dst);
+    /* ★★★ 内存泄漏修复（实测每帧 +5~9MB，是「连上黑屏」的真根因）：
+       IOSurfaceFrame::CVPixelBuffer() / IOSurface() 返回的都是 **+1 引用**
+       —— 反汇编确认（0x235ee0 处 `callq _CFRetain`，sret 返回已 retain 的对象），
+       因此**调用方必须 CFRelease**。早期版本只对 IOSurface() 释放了（第 123 行），
+       却把两个 CVPixelBuffer() 的返回值一直挂着 —— 其中 dst 是**每帧新建的编码器输入帧**，
+       于是每帧泄漏一个 IOSurface（其引用计数永不归零 → 内核不回收该 surface 内存）。
+       实测后果：25 秒会话把本进程 RSS 从 55MB 推到 1539MB，断开也不回落（停在 2.7GB），
+       IOSurface 分区涨到 3.0GB / 1099 个；**下一个连接随即 IOSurfaceCreate 失败 → 黑屏**
+       （日志：`分配缓冲重试 8 次仍失败 → 本次会话无帧`），并把 swap 顶到十几 GB。
+       ⇒ 本函数所有出口统一走 out: 释放 srcRef/dstRef/wrapped。新增出口务必复用 out:。 */
+    CVPixelBufferRef srcRef = (CVPixelBufferRef)get_pixelbuffer(self);   /* +1，本函数负责还 */
+    CVPixelBufferRef dstRef = (CVPixelBufferRef)get_pixelbuffer(dst);    /* +1，本函数负责还 */
+    CVPixelBufferRef wrapped = NULL;
+    CVPixelBufferRef src = srcRef;
+    struct ec ret;
 
     /* 源 buffer 缺失时用 IOSurface 现场包一个（仍然不依赖成员偏移） */
-    CVPixelBufferRef wrapped = NULL;
     if (!src) {
         IOSurfaceRef s = (IOSurfaceRef)get_iosurface(self);
         if (s) {
@@ -124,45 +136,45 @@ static struct ec my_CopyTo(void *self, void *dst) {
         }
     }
 
-    if (!src || !dstPB) {
-        if (wrapped) CFRelease(wrapped);
+    if (!src || !dstRef) {
         unsigned long fb = __sync_add_and_fetch(&nfb, 1);
         L("!! CopyTo #%lu 源/目标 buffer 不可得（src=%p dst=%p）→ 回退原实现（第 %lu 次）",
-          c, (void*)src, (void*)dstPB, fb);      /* 回退必须无条件记录：否则会被限频掩盖 */
-        return g_orig_CopyTo(self, dst);
+          c, (void*)src, (void*)dstRef, fb);     /* 回退必须无条件记录：否则会被限频掩盖 */
+        ret = g_orig_CopyTo(self, dst);
+        goto out;
     }
 
     size_t sw = CVPixelBufferGetWidth(src),  sh = CVPixelBufferGetHeight(src);
-    size_t dw = CVPixelBufferGetWidth(dstPB), dh = CVPixelBufferGetHeight(dstPB);
-    OSType sf = CVPixelBufferGetPixelFormatType(src), df = CVPixelBufferGetPixelFormatType(dstPB);
-    size_t spn = CVPixelBufferGetPlaneCount(src), dpn = CVPixelBufferGetPlaneCount(dstPB);
+    size_t dw = CVPixelBufferGetWidth(dstRef), dh = CVPixelBufferGetHeight(dstRef);
+    OSType sf = CVPixelBufferGetPixelFormatType(src), df = CVPixelBufferGetPixelFormatType(dstRef);
+    size_t spn = CVPixelBufferGetPlaneCount(src), dpn = CVPixelBufferGetPlaneCount(dstRef);
 
     if (sw != dw || sh != dh || sf != df || spn != dpn || dpn == 0) {
-        if (wrapped) CFRelease(wrapped);
         unsigned long fb = __sync_add_and_fetch(&nfb, 1);
         L("!! CopyTo #%lu 尺寸/格式不符（源 %zux%zu 0x%08x/%zu 目标 %zux%zu 0x%08x/%zu）→ 回退（第 %lu 次）",
           c, sw,sh,(unsigned)sf,spn, dw,dh,(unsigned)df,dpn, fb);   /* 无条件记录 */
-        return g_orig_CopyTo(self, dst);
+        ret = g_orig_CopyTo(self, dst);
+        goto out;
     }
 
     CVReturn l1 = CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
-    CVReturn l2 = (l1 == kCVReturnSuccess) ? CVPixelBufferLockBaseAddress(dstPB, 0) : (CVReturn)-1;
+    CVReturn l2 = (l1 == kCVReturnSuccess) ? CVPixelBufferLockBaseAddress(dstRef, 0) : (CVReturn)-1;
 
     if (l1 == kCVReturnSuccess && l2 == kCVReturnSuccess) {
         size_t total = 0;
         double t0 = now_ms();
         for (size_t p = 0; p < dpn; p++) {
-            void *d = dpn==1 ? CVPixelBufferGetBaseAddress(dstPB) : CVPixelBufferGetBaseAddressOfPlane(dstPB, p);
+            void *d = dpn==1 ? CVPixelBufferGetBaseAddress(dstRef) : CVPixelBufferGetBaseAddressOfPlane(dstRef, p);
             void *s = spn==1 ? CVPixelBufferGetBaseAddress(src)   : CVPixelBufferGetBaseAddressOfPlane(src, p);
             if (!d || !s) continue;
-            size_t dbpr = dpn==1 ? CVPixelBufferGetBytesPerRow(dstPB) : CVPixelBufferGetBytesPerRowOfPlane(dstPB, p);
+            size_t dbpr = dpn==1 ? CVPixelBufferGetBytesPerRow(dstRef) : CVPixelBufferGetBytesPerRowOfPlane(dstRef, p);
             size_t sbpr = spn==1 ? CVPixelBufferGetBytesPerRow(src)   : CVPixelBufferGetBytesPerRowOfPlane(src, p);
-            size_t hh   = dpn==1 ? CVPixelBufferGetHeight(dstPB)      : CVPixelBufferGetHeightOfPlane(dstPB, p);
+            size_t hh   = dpn==1 ? CVPixelBufferGetHeight(dstRef)      : CVPixelBufferGetHeightOfPlane(dstRef, p);
             size_t row  = sbpr < dbpr ? sbpr : dbpr;
             for (size_t y = 0; y < hh; y++) memcpy((char*)d + y*dbpr, (char*)s + y*sbpr, row);
             total += row * hh;
         }
-        CVPixelBufferUnlockBaseAddress(dstPB, 0);
+        CVPixelBufferUnlockBaseAddress(dstRef, 0);
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         unsigned long ok = __sync_add_and_fetch(&nok, 1);
         if (verbose) {
@@ -178,14 +190,23 @@ static struct ec my_CopyTo(void *self, void *dst) {
               avg_gap > 0 ? 1000.0 / avg_gap : 0, sum_copy / n);
             n = 0; sum_copy = 0; sum_gap = 0;
         }
-        if (wrapped) CFRelease(wrapped);
-        return (struct ec){0, NULL};
+        ret = (struct ec){0, NULL};
+        goto out;
     }
 
+    {
+        unsigned long fb2 = __sync_add_and_fetch(&nfb, 1);
+        L("!! CopyTo #%lu 锁失败（l1=%d l2=%d）→ 回退（第 %lu 次）", c, (int)l1, (int)l2, fb2);
+    }
+    ret = g_orig_CopyTo(self, dst);
+
+out:
+    /* ★ 统一出口：访问器给的 **+1 引用**必须还回去，否则每帧泄漏（见函数开头注释）。
+       wrapped 是我们自己 Create 的，同样在这里还。**新增任何出口都必须 goto out**。 */
     if (wrapped) CFRelease(wrapped);
-    unsigned long fb2 = __sync_add_and_fetch(&nfb, 1);
-    L("!! CopyTo #%lu 锁失败（l1=%d l2=%d）→ 回退（第 %lu 次）", c, (int)l1, (int)l2, fb2);
-    return g_orig_CopyTo(self, dst);
+    if (srcRef)  CFRelease(srcRef);
+    if (dstRef)  CFRelease(dstRef);
+    return ret;
 }
 
 /* ---------- vtable 槽替换 ---------- */

@@ -445,13 +445,94 @@ bash uu.sh watchdog-stop           # 停止常驻循环
 tail -f /tmp/uushim-watchdog.log   # 看它做过什么
 ```
 
-- **触发**：已 >60s 无出帧 **且** 出现 `流数超上限` / `分配失败≥3` / 多实例；或 RSS >3GB。
-- **铁律**：还在出帧就绝不动它（重启会踢掉正在用的用户）。
+- **触发（三档）**：
+  ① **空闲回收** —— 已 >60s 无出帧（没人连）且 RSS >800MB：重启 server 把上一场会话
+     泄漏的内存还回去，**防住「下次连接黑屏」**；
+  ② **无帧故障** —— 已 >60s 无出帧 **且** 出现 `流数超上限` / `分配失败≥3` / 多实例；
+  ③ **硬顶** —— RSS >3500MB（真失控，无论有无会话）。
+- **铁律**：还在出帧就绝不动它（重启会踢掉正在用的用户）→ 会话进行中 RSS 偏高只记警告，
+  等停帧后再回收。阈值可用 `UU_WD_RSS_MB` / `UU_WD_RSS_IDLE_MB` / `UU_WD_IDLE` 覆盖。
 - **恢复动作**：杀 server+service → kickstart agent → 确保 GUI 在 → 等 server 回来
   → **回读登录态/网络态**才算完成（进程在 ≠ 已注册上线）。
 - 冷却 180 秒；`~/Library/LaunchAgents/com.uuremote-cg-patch.watchdog.plist` 负责重启后自动加载。
-- **RSS 不能单看**：会话中本进程 RSS 可达 1~1.8GB 且会自然波动回落（缓冲池保留，非泄漏），
-  阈值定低会误杀正在串流的会话。
+- **RSS 阈值为何是 800MB / 3500MB**：空闲正常 ~55MB；一场会话后 ~260~350MB
+  （会话开头几秒一次性建立缓冲池，之后平稳）。**曾经把「会话中 RSS 涨到 1.8GB」
+  当成正常的缓冲池保留 —— 那是错的，它是真泄漏**（见下一节）。修掉泄漏后 RSS 不再随帧数增长。
+
+## 内存泄漏：每出一帧泄漏 2 个 CVPixelBuffer 引用（已修，「连上黑屏」的真根因）
+
+**症状**：连接成功但**过一会儿 / 下一次连接就黑屏**；空闲内存个位数 MB；swap 涨到十几 GB；
+看门狗重启后短暂恢复，然后循环往复。
+
+**实测（修复前）**：
+
+| 指标 | 数值 |
+|---|---|
+| 25 秒会话（192 帧） | UURemoteServer RSS **55MB → 1539MB** |
+| 每帧 | **+5~9MB（完美线性）** |
+| IOSurface 分区 | **3.0GB / 1099 个**（单个 ~2.74MB） |
+| 会话结束后 | **不回落**（停在 2.7GB） |
+| 空闲内存 | 会话中从 910MB 掉到 **16MB** |
+
+**根因（代码级 + 反汇编确认）**：`cpupath/libuucpupath.c` 的 `my_CopyTo()` 中，
+`IOSurfaceFrame::CVPixelBuffer()` 是 **sret 按值返回 + CFRetain** 的访问器
+（反汇编 `0x235ee0`：`movq 0x68(%rsi),%r14 … callq _CFRetain`）——
+**返回 +1 引用，调用方必须 CFRelease**。原实现只释放了 `IOSurface()` 的返回值，
+两个 `CVPixelBuffer()` 的返回值（`self` 的源帧 + `dst` 的编码器输入帧）
+**在全部 4 条出口路径上都没释放**；其中 `dst` 是**每帧新建**的，
+于是每帧泄漏一个 IOSurface，其引用计数永不归零 → 内核不回收该 surface 的内存。
+
+**后果链**：内存被吃干 → 下一次连接 `IOSurfaceCreate` 失败（-6662）→
+`分配缓冲重试 8 次仍失败 → 本次会话无帧` → **黑屏**；同时把 swap 顶到 11GB。
+
+**修复**：所有出口统一走 `out:` 标签，一次性释放 `wrapped` / `srcRef` / `dstRef`。
+**新增任何出口都必须 `goto out`**（否则又会漏）。
+
+**修复效果（同规模对照）**：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| IOSurface 增量（192 帧） | +299 个 / +819MB | **+3 个 / +0MB** |
+| 每帧 RSS | 8.8MB（线性增长） | **0.05MB（噪声级）** |
+| 60 秒会话后 RSS | 涨到 2.7GB 且不回落 | **平稳在 ~349MB** |
+| 空闲内存 | 掉到 16MB | **保持 1420MB+** |
+| CopyTo 拷贝耗时 | 2.4~3.1 ms/帧 | **0.5~0.9 ms/帧**（内存压力消失的红利） |
+
+**取证要点**：`sudo vmmap --summary <pid> | grep IOSurface` 看**个数**列最直观；
+配合 `ps -o rss=` 前后对比，即可判断「按帧线性增长 = 泄漏」。
+
+## 注入方式：必须精准注入，绝不能用 `launchctl setenv`
+
+**正确**：把 `DYLD_INSERT_LIBRARIES` 写进 **UU 自己的 LaunchAgent plist**
+（`/Library/LaunchAgents/com.netease.uuremote.agent.plist` 的 `EnvironmentVariables`）——
+只有 UU 及其子进程会加载本库。
+
+**禁止**：`launchctl setenv DYLD_INSERT_LIBRARIES ...` —— 那是 **launchd 用户域全局**变量，
+所有由 launchd 启动/继承环境的进程都会去加载我们的**未签名** dylib，
+被 macOS 的 CODESIGNING 保护直接 SIGKILL：
+
+```
+termination: {namespace: CODESIGNING, indicator: Invalid Page, code: 2}
+exception:   SIGKILL (Code Signature Invalid)
+```
+
+**实测代价**：使用全局注入当天产生 **141 份**系统进程崩溃报告（前一天仅 1 份），
+涉及 devicecheckd / biomesyncd / ModelCatalogAgent / amsondevicestoraged /
+generativeexperiencesd 等系统守护进程；**连 `pgrep`、`screencapture` 一类命令行工具
+执行即被杀**（极易被误判成「没有录屏权限」）；系统卡顿，System Settings 都起不来。
+收窄到 plist 后：崩溃归零，系统恢复安静。
+
+**ad-hoc 签名救不了**：给 dylib 做 `codesign -f -s -`（install.sh 仍会做，无害）
+**不能**避免上述崩溃 —— 必须靠收窄注入范围。
+
+**改 plist 后如何让 launchd 重读**：`launchctl unload` 然后 `launchctl load -w`。
+**`launchctl kickstart -k` 不会重读 plist** —— 实测新进程拿不到新环境变量 → 注入丢失 → 黑屏。
+
+**UU 升级会覆盖该 plist** → 由 `~/Library/LaunchAgents/com.uuremote-cg-patch.cpupath.plist`
+在每次登录时幂等复核并补回（`~/Library/Application Support/UUCpuPath/apply.sh`，
+日志 `apply.out.log`）。
+
+**自查**：`bash cpupath/status.sh` 第 3 节会明确检查全局变量是否为空（非空 = 正在伤害系统）。
 
 ## 关于分辨率：为什么「调显示模式」救不了帧率（实测推翻的结论）
 
