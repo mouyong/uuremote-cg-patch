@@ -7,7 +7,7 @@
 ## 救命命令速查
 
 ```bash
-D=~/.hermes/uuremote-cg-patch/uu.sh
+D=./uu.sh                    # 在本项目目录下执行；不在该目录时写完整路径
 
 # ① 查现在什么状态（免 sudo，★ 最常用；补丁/shim/进程/看门狗/内存一屏看完）
 bash $D status
@@ -38,6 +38,60 @@ bash $D setmode 1280x720   # 降到 720p（像素少 2.25 倍 → 帧率明显�
 **UU 每次自动更新后，直接重跑 `install` 就行。**
 
 全部子命令：`bash $D help`
+
+## 从仓库开始使用（clone 后怎么跑）
+
+### 前置条件
+
+- 官版 UURemote 已装（`/Applications/UURemote.app`）
+- 症状对得上：**能连上，但被控端纯黑屏 / 一直卡在「正在传输画面」**
+- 机器属于这一类：**无 Metal、无 IOGPU、无硬件 H.264 编码器**的老 Mac
+  （本方案的验证机是 2011 Mac mini + OCLP，见下方「根因」）
+- 需要 sudo（要改写 App 内的库、重启 root 守护进程）
+
+### 第一步：生成你自己的签名证书
+
+重签名必须用**一张自签证书**，且它的 `OU` 要等于 UU 的 TeamID ——
+UU 内部会校验对端组件的 teamID（二进制里可见 `certificate leaf[subject.OU]`），
+不满足就直接拒绝 XPC 通信。仓库里只有公钥与生成配置，**私钥不入库**，
+请在本机生成：
+
+```bash
+cd cert
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout key.pem -out cert.pem -config openssl.cnf
+openssl pkcs12 -export -out id.p12 -inkey key.pem -in cert.pem -passout pass:patch
+```
+
+> p12 的密码必须填 `patch` —— 脚本导入临时钥匙串时用的是这个（写在 `uu.sh` 的 `P12PASS`）。
+
+### 第二步：装补丁
+
+```bash
+sudo bash uu.sh install
+```
+
+它会自动：识别 UU 版本 → 从官方库重建基线备份 → 定位补丁点 →
+打补丁（第 1/3/4 道门）→ 注入帧源（第 2 道门）→ 用你的证书重签名 → 启动。
+
+### 第三步：重新授权
+
+签名一换，系统的隐私授权就失配了（尤其是「辅助功能」）。装完必须按
+`install` 末尾打印的提示，去「系统设置 → 隐私与安全性」把两项重新勾一遍。
+详见下方「装完必做：重新授权」。
+
+### 哪些文件不在仓库里（都是自动生成或你本地生成）
+
+| 文件 | 大小 | 来源 |
+|---|---|---|
+| `libstreamer.dylib.orig` | ~25MB | 首次 `install` 时从官方 App **自动备份** |
+| `libstreamer.dylib.patched` | ~25MB | 每次 `install` 由 `patch_tool.py` **自动生成** |
+| `shim/backup/UURemoteServer.orig` | ~24MB | `shim-install` 时**自动备份** |
+| `cert/key.pem`、`cert/id.p12` | 几 KB | **你按第一步自己生成**（私钥不入库） |
+| `archive/`、`*.before-certsign/` | 视情况 | 本地历史与整包快照，不入库 |
+
+这些都是网易 UURemote 的原始库文件（含版权）或你的本机私钥，
+随仓库分发既无必要也不合适，所以走了 `.gitignore`。
 
 ## 两个问题的根因（都查实了，有对照组）
 
@@ -201,11 +255,11 @@ UU 的校验串里**不含 `anchor apple generic`**（全组件 grep 计数 = 0�
 `unknown` 会明确报警而不是瞎打。
 
 ```bash
-python3 ~/.hermes/uuremote-cg-patch/patch_tool.py check  <库>       # 两行：video / audio
-python3 ~/.hermes/uuremote-cg-patch/patch_tool.py locate <库>       # 打印 视频偏移 + 映射差
-python3 ~/.hermes/uuremote-cg-patch/patch_tool.py patch   <源> <目标>   # 打两处补丁
-python3 ~/.hermes/uuremote-cg-patch/patch_tool.py unpatch <源> <目标>   # 无损还原官方库
-python3 ~/.hermes/uuremote-cg-patch/patch_tool.py audiosites <库>       # 列出音频守卫位置
+python3 patch_tool.py check  <库>       # 两行：video / audio
+python3 patch_tool.py locate <库>       # 打印 视频偏移 + 映射差
+python3 patch_tool.py patch   <源> <目标>   # 打两处补丁
+python3 patch_tool.py unpatch <源> <目标>   # 无损还原官方库
+python3 patch_tool.py audiosites <库>       # 列出音频守卫位置
 ```
 
 ## 装完必做：重新授权
@@ -228,10 +282,10 @@ tccutil reset Accessibility com.netease.uuremote
 
 ```bash
 # 1) 状态与签名自检
-bash ~/.hermes/uuremote-cg-patch/uu.sh status
+bash uu.sh status
 
 # 2) 采集器是否走 CG（应无 -3802、无 SCStream 报错）
-bash ~/.hermes/uuremote-cg-patch/uu.sh verify
+bash uu.sh verify
 
 # 3) XPC 是否还被拒（应无输出）
 log show --last 2m --predicate 'process == "UURemoteDaemon"' --style compact \
@@ -315,15 +369,15 @@ log show --last 2m --predicate 'process == "UURemoteDaemon"' --style compact \
 rm -rf /tmp/dry && mkdir -p /tmp/dry
 ditto /Applications/UURemote.app /tmp/dry/UURemote.app
 UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 \
-  bash ~/.hermes/uuremote-cg-patch/uu.sh cg-install
+  bash uu.sh cg-install
 
 # B) 只演练签名环节
 UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 \
-  bash ~/.hermes/uuremote-cg-patch/uu.sh sign
+  bash uu.sh sign
 
 # C) 只演练 shim（帧源替换）
 UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 \
-  bash ~/.hermes/uuremote-cg-patch/uu.sh shim-install
+  bash uu.sh shim-install
 ```
 
 演练会跳过退出/启动 UU、改属主、写基线，其余（临时钥匙串、预检、逐组件签名、
@@ -359,7 +413,7 @@ uuremote-cg-patch/
 
 **从旧脚本回退**：整合前的 9 个脚本完整保留在 `archive/pre-merge-20260926/`。
 要回退：`cp archive/pre-merge-20260926/*.sh .`（放回顶层即可用；它们靠自身路径定位资源）。
-其中 `uu-cg-patch.sh` 还支持 `UURT_DIR=<项目目录>` 直接在归档目录里跑。
+其中归档的 `uu-cg-patch.sh`（旧版）还支持 `UURT_DIR=<项目目录>` 直接在归档目录里跑。
 
 **版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本在 `archive/`。
 `libuushim.c` 是唯一真源，任何 dylib 都可由它重新编译。
