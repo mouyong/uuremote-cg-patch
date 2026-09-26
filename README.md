@@ -28,9 +28,10 @@ sudo bash $D daemon    # 重启 root 守护进程（修状态陈旧）
 # ⑥ 查 UU 实际走了哪套采集器（免 sudo，手机连过一次后跑）
 bash $D verify
 
-# ⑦ 帧率低：先看 status 里的 Docker 告警，再考虑降分辨率
-bash $D setmode list       # 看可选分辨率
-bash $D setmode 1280x720   # 降到 720p（像素少 2.25 倍 → 帧率明显回升）
+# ⑦ 帧率低：先看 status 里的 Docker 告警；setmode 只改显示模式，
+#     实测**不能**降低码流负载（见文件末尾「关于分辨率」一节）
+bash $D setmode list       # 看可选分辨率（含 1080p/900p/720p 俗称与像素占比）
+bash $D setmode 720p       # 切成 1280x720（俗称写法，等价 setmode 1280x720）
 ```
 
 `install` = `cg-install`（第1/3/4道门）+ `shim-install`（第2道门），会自动完成：
@@ -433,7 +434,7 @@ uuremote-cg-patch/
 | `libstreamer.dylib.patched` | 补丁版（可从 orig 随时再生） |
 | `shim/backup/UURemoteServer.orig` | **被控端原库**（shim 装机/还原的活依赖，别删！） |
 | `UURemote.entitlements` | UU 的权限声明（签名时保留） |
-| `tools/setmode` | 分辨率切换（提帧率最有效的一刀，可逆） |
+| `tools/setmode` | 显示模式切换（可逆）。**注意：它只改显示，不改码流尺寸 —— 见文末「关于分辨率」** |
 
 ### 看门狗（无人值守时的自愈）
 
@@ -451,3 +452,39 @@ tail -f /tmp/uushim-watchdog.log   # 看它做过什么
 - 冷却 180 秒；`~/Library/LaunchAgents/com.uuremote-cg-patch.watchdog.plist` 负责重启后自动加载。
 - **RSS 不能单看**：会话中本进程 RSS 可达 1~1.8GB 且会自然波动回落（缓冲池保留，非泄漏），
   阈值定低会误杀正在串流的会话。
+
+## 关于分辨率：为什么「调显示模式」救不了帧率（实测推翻的结论）
+
+本机无硬编，H.264 走 `AppleH264SW` 软件编码，是帧率的唯一瓶颈（实测编码进程约占 150% CPU，
+2 核上限 200%，合计稳定超载在 235~275%）。很自然会想到「把分辨率降下来」——
+但**实测证明这条路走不通**，原因有两层：
+
+**① UU 在会话建立时会把显示模式重置。**
+在空闲状态把显示设成 1600x900（回读确认成功、`system_profiler` 也一致），
+一旦别的设备连上来，显示模式立刻被改回 **1920x1080**，采集也随之回到 1080p。
+
+**② 即使会话进行中强行改小，码流尺寸也不会变。**
+UU 把尺寸当**参数**传给采集接口（`CGDisplayStreamCreate(d, w, h, ...)` 的 `w/h`），
+这个几何是 UU 自己决定的，与显示模式**解耦**。shim 拿到 1600x900 的截图后，
+会用 `CGContextDrawImage` 把它**缩放填进 UU 指定的 1920x1080 帧缓冲**
+（见 `shim/libuushim.c` 的帧填充逻辑）。
+
+**实测对照**（同一台机器、Docker 已退出、各采样 25 秒）：
+
+| 显示模式 | 码流几何 | 编码器 CPU | 合计 CPU | 帧率 | 平均帧间隔 |
+|---|---|---|---|---|---|
+| 1920x1080 | 1920x1080 | 133.6% | 235.2% | 6.00 FPS | 167 ms |
+| 1600x900 | **1920x1080** | 147.3% | 274.0% | 6.30 FPS | 159 ms |
+
+⇒ 显示切小后 CPU 与帧率**在噪声范围内没有变化**，而画面因为被拉伸反而更糊。
+**所以 1600x900 / 720p 都不该当作提帧率的手段。**
+
+真正会降低编码负载的是**码流尺寸**，它由 UU 的会话参数决定（不是显示模式）。
+可探索的方向（都还没做，需要另行验证）：
+
+1. 在 UU 客户端/被控端界面里找「画质 / 分辨率」设置（UU 把这类配置加密存在
+   `~/Library/Preferences/com.netease.uuremote.plist` 的 `customVideoConfig` 里，
+   拿不到明文，也没有对应的 CLI 子命令）。
+2. 在 shim 层同时改两处几何：拦截 `CGDisplayStreamCreate` 的 `w/h`，
+   并同步把 `VTCompressionSessionCreate` 的尺寸改成同一个值，让整条链路一致地跑在
+   较低分辨率 —— 风险在于客户端可能按协商好的尺寸解码，需要逐项验证。

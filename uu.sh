@@ -1753,7 +1753,7 @@ UU远程 修复工具集 —— 单文件入口
   monitor             实时看 CPU 与帧率
   traffic             看上行走哪条网卡 / 码率 / 中继
   encoder             编码器能力实测（确认有没有硬件编码）
-  setmode [模式]      查看/切换分辨率（如 setmode 1280x720）—— 提帧率最有效
+  setmode [模式]      查看/切换分辨率（setmode list / 720p / 900p / 1080p）—— 提帧率最有效
   cleanup             项目清理（演练；--apply 实做）
 
 【其他】
