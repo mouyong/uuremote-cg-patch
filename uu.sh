@@ -1472,10 +1472,25 @@ watchdog_main() {
 # 必须重启被控端。让它在无人值守时自动恢复。
 #
 # 判据（任一命中即恢复）：
-#   ① 进程 RSS 过大（泄漏）        —— 阈值 500MB（正常 ~50MB，坏掉时实测 1.7GB）
-#   ② 近期反复分配失败             —— 窗口内 `无可用缓冲`/`分配失败` ≥ 3 次
-#   ③ 近期槽位耗尽                 —— 窗口内 `流数超上限` ≥ 1 次
-#   ④ 有失败信号且已停止出帧 ≥60s  —— 避免误杀正在正常串流的会话
+#   ① 空闲回收（★ 新增，最重要）    —— 无人连接且 RSS > 800MB：把上一场会话泄漏的内存还回去
+#   ② 进程 RSS 硬顶（真泄漏失控）   —— RSS > 3500MB（无论有没有会话）
+#   ③ 近期反复分配失败             —— 窗口内 `无可用缓冲`/`分配失败` ≥ 3 次，且已停帧
+#   ④ 近期槽位耗尽                 —— 窗口内 `流数超上限` ≥ 1 次，且已停帧
+#
+# ★★ 为什么必须加「① 空闲回收」（实测数据）：
+#     本机这套补丁链上，**每出一帧就新增约 3 个 IOSurface（单个 ~2.74MB、合计 ~5~9MB）**，
+#     且**会话结束后不回收** —— 实测 25 秒会话把 UURemoteServer 的 RSS 从 55MB 推到 1539MB，
+#     会话结束仍停在 2.7GB；IOSurface 分区涨到 3.0GB / 1099 个。
+#     后果：下一个连上来的人 **分配不到 IOSurface → 黑屏**（日志：`IOSurfaceCreate[0] 失败
+#     （内存不足）` → `分配缓冲重试 8 次仍失败 → 本次会话无帧`），同时把 swap 顶到十几 GB。
+#     即「**上次的会话把内存吃光，导致这次黑屏**」。
+#     所以：趁**没人连**的时候重启一次 server 回收，用户无感；比等他连上来发现黑屏强得多。
+#     实测重启后 RSS 55MB、IOSurface 归零，连接立刻恢复有画面。
+#
+# ★★ 为什么**不在会话进行中**因为 RSS 高就重启：
+#     实测会话中即使空闲内存只剩 16MB，出帧仍然正常（shim 的缓冲池在会话开始时一次性分配好）；
+#     此时重启只会**当场把用户踢下线**（这正是 03:15 那次的直接原因）。
+#     所以：会话进行中只记警告不动手，等它空闲下来再回收。
 #
 # 保守原则：**只要还有人在正常出帧就不动它**（重启会踢掉用户）。
 # 冷却：3 分钟内最多恢复一次（防止故障持续时反复重启）。
@@ -1488,10 +1503,9 @@ SHIM_LOG="${UU_SHIM_LOG:-/tmp/uushim.log}"
 WD_LOG="${UU_WD_LOG:-/tmp/uushim-watchdog.log}"
 STAMP="${UU_WD_STAMP:-/tmp/.uushim-watchdog-last}"
 WINDOW="${UU_WD_WINDOW:-120}"      # 观测窗口（秒）
-# ★ RSS 阈值刻意定得很高：实测会话进行中本进程 RSS 可达 1~1.8GB 且会自然回落
-#   （IOSurface / 编码器缓冲的正常占用，会话结束即回收），定低了会**误杀正在串流
-#   的会话**（把用户踢掉）。这里只用来兜真正的失控泄漏。
-RSS_LIMIT_MB="${UU_WD_RSS_MB:-3000}"  # RSS 阈值（MB）
+RSS_LIMIT_MB="${UU_WD_RSS_MB:-3500}"      # RSS 硬顶（MB）：真失控泄漏，无论有无会话
+RSS_IDLE_MB="${UU_WD_RSS_IDLE_MB:-800}"   # 空闲回收阈值（MB）：无人连时超过就重启回收内存
+IDLE_SEC="${UU_WD_IDLE:-60}"              # 多久没出帧算「无人连接（空闲）」
 COOLDOWN="${UU_WD_COOLDOWN:-180}"  # 冷却（秒）
 NOFRAME_SEC="${UU_WD_NOFRAME:-60}" # 无出帧多少秒算停流
 
@@ -1546,11 +1560,15 @@ DIAG="rss=${RSS_MB}MB fail=${FAIL_N} exhaust=${EXHAUST_N} noframe=${LAST_FRAME_S
 
 # ---------- 判定 ----------
 # ★★ 铁律：**只要还在正常出帧就不动它**（重启会踢掉正在用的用户）。
-#    只有「确实出不了帧」才恢复；唯一例外是 RSS 失控（硬顶）。
+#    恢复只发生在两类时刻：① 空闲期（没人连）回收内存；② 确实出不了帧且有故障信号。
 REASON=""
 if [ "$RSS_MB" -gt "$RSS_LIMIT_MB" ]; then
-  # 硬顶：即使正在出帧也认（这种量级的泄漏必然很快拖垮机器）
+  # 硬顶：这种量级的泄漏必然很快拖垮机器
   REASON="进程内存失控（${RSS_MB}MB > ${RSS_LIMIT_MB}MB）"
+elif [ "$LAST_FRAME_SEC" -gt "$IDLE_SEC" ] && [ "$RSS_MB" -gt "$RSS_IDLE_MB" ]; then
+  # ★ 空闲回收：没人连 + RSS 高 = 上一场会话泄漏的内存还占着，
+  #   不回收的话**下一个连上来的人会分配不到 IOSurface → 黑屏**（实测链）。
+  REASON="空闲回收（无帧 ${LAST_FRAME_SEC}s 且 RSS ${RSS_MB}MB > ${RSS_IDLE_MB}MB，回收防黑屏）"
 elif [ "$LAST_FRAME_SEC" -gt "$NOFRAME_SEC" ]; then
   # 已经出不了帧，再看是哪种故障
   if [ "$EXHAUST_N" -gt 0 ]; then
@@ -1560,6 +1578,11 @@ elif [ "$LAST_FRAME_SEC" -gt "$NOFRAME_SEC" ]; then
   elif [ "$SRV_CNT" -gt 1 ]; then
     REASON="存在 ${SRV_CNT} 个 server 实例（互相干扰）且已 ${LAST_FRAME_SEC}s 无帧"
   fi
+fi
+
+# 会话进行中 RSS 偏高 → 只记警告（实测此时重启会把用户当场踢下线；停帧后再回收）
+if [ -z "$REASON" ] && [ "$RSS_MB" -gt "$RSS_IDLE_MB" ] && [ "$LAST_FRAME_SEC" -le "$IDLE_SEC" ]; then
+  log "提示：会话进行中 RSS=${RSS_MB}MB 偏高（每帧泄漏约 5~9MB），暂不动手；停帧 ${IDLE_SEC}s 后自动回收"
 fi
 
 if [ -z "$REASON" ]; then
