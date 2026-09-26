@@ -1,0 +1,18 @@
+[ req ]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+x509_extensions    = v3_codesign
+
+[ dn ]
+CN = UURemote CG Patch
+OU = PU9BNSBJW7
+O  = UURemote CG Patch
+C  = CN
+
+[ v3_codesign ]
+basicConstraints   = critical,CA:false
+keyUsage           = critical,digitalSignature
+extendedKeyUsage   = critical,codeSigning
+subjectKeyIdentifier = hash
