@@ -77,6 +77,18 @@ Before writing code:
     - 所以：给它一个**自己的 LaunchAgent**（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive），
       由 launchd 托管；安装/签名的收尾、以及看门狗都要调 `server_agent_up`。
     - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
+15. **bash 的 `trap ... EXIT` 是「后者覆盖前者」，不是叠加。**
+    本项目里 `sign_main` 内部会 `trap cleanup EXIT`；如果只在**顶层**再挂一条
+    （例如「退出时停掉后台守护」），跑到 sign_main 就被覆盖掉了 ——
+    实测后果：安装结束后弹窗自动应答器仍在空转，没人发现。
+    **收口办法**：把退出清理塞进 `cleanup()` 这一个函数里，所有退出路径（正常/报错/中断）都覆盖。
+16. **钥匙串授权弹窗：解锁 ≠ 授权（别再把这两件事混起来）。**
+    - `security unlock-keychain` 只让钥匙串可用（消除 codesign 的 `errSecInternalComponent`）。
+    - 但重签后 UU 读自己的密钥 `com.netease.uuremote` 时，系统仍会问
+      「这个 app 能不能读这把密钥」——那是一次 **ACL 授权**，与锁不锁无关，**每次重签都会再问一次**。
+    - 无人值守要装得过，就得自动应答：`dialog_watcher_start`（安装期间后台轮询 SecurityAgent，
+      填登录口令 + 点「始终允许」），口令从 `.local/keychain-pw` 读（600、gitignored、不入库）。
+    - 想**彻底**不再弹，只能放宽该密钥的 partition list / ACL —— 属安全降级，须用户拍板后再做。
 
 ## Working Rules（工作规则）
 

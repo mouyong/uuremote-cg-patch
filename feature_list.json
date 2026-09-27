@@ -221,8 +221,8 @@
       "dependencies": [
         "feat-115"
       ],
-      "status": "in-progress",
-      "evidence": "已做：① 口令放本地私有文件 `.local/keychain-pw`（600 权限、`.gitignore` 覆盖、**绝不入 git**），`uu.sh` 新增 `preunlock_login_keychain` 在签名前解锁登录钥匙串；② 弹窗可用 AppleScript（System Events / AX 通道）读取与应答 —— 实测成功读出「想要访问钥匙串中的密钥」并点击「始终允许」，UU 四进程随即恢复正常 XPC 通信。★ **关键认识（必须记住）**：**解锁钥匙串 ≠ 授予 ACL 授权**。钥匙串解锁只让钥匙串本身可用，而弹窗问的是「这个 app 能不能读这把密钥」——所以只做预解锁**不足以**消除该弹窗，每次重签后仍会弹一次。★ 真正免弹窗的候选方案（未做，需评估安全含义）：对该密钥设置 partition list（`security set-generic-password-partition-list -S apple-tool:,apple:,codesign: -s com.netease.uuremote -a <acct> -k <登录密码>`），或把该密钥 ACL 放宽；两种都不理想 —— 它会放宽「哪些进程能读该密钥」的范围，属于安全降级，应与用户确认后再做。★ 另注：本机 `screencapture` / cua-driver 全屏截图被系统 SIGKILL(137)（注入变量为空，非污染）→ GUI 操作只能走 AX 通道（`osascript` + System Events），这也是本次能处理弹窗的原因。★ 弹窗处理脚本放在 /tmp（用后即弃）；口令本身只在本地文件与脚本内部流转，不打印、不入库。"
+      "status": "done",
+      "evidence": "已做：① 口令放本地私有文件 `.local/keychain-pw`（600 权限、`.gitignore` 覆盖、**绝不入 git**），`uu.sh` 新增 `preunlock_login_keychain` 在签名前解锁登录钥匙串；② 弹窗自动应答固化成项目组件 `tools/uu-dialog-responder.applescript` + `uu.sh` 的 `dialog_watcher_start/stop`：安装/签名期间以**真实用户身份**后台轮询 SecurityAgent，认准「钥匙串 + 机密信息/想要」这类文案（别的系统弹窗不碰），填入登录口令并点「始终允许」；没口令文件则不起守护、也绝不向用户索取口令。③ 停止动作收口进 `cleanup()`。★ **关键认识（别搞混）**：**解锁钥匙串 ≠ 授予 ACL 授权**。预解锁只让签名能读到私钥（消除 codesign 的 errSecInternalComponent），而弹窗问的是「这个 app 能不能读这把密钥」—— **每次重签都会再问一次**，所以只做预解锁**不足以**消掉弹窗。★ 实测踩到的坑：`trap 'dialog_watcher_stop' EXIT` 挂在顶层**无效** —— `sign_main` 内部有 `trap cleanup EXIT`，bash 的同名信号 trap 是**覆盖而非叠加** → 装完应答器仍在空转。改为把停止并进 `cleanup()` 后复测：安装期间应答器在跑、安装结束即停（已验证）。★ 验证：两次完整 `shim-install` 全程**无弹窗**（无人值守可装完）、装完权限齐全、server 自动托管、设备在线、端到端全 PASS。★ 真正免弹窗的候选方案（未做，需评估安全含义）：对该密钥设置 partition list 或放宽 ACL —— 会放宽「哪些进程能读该密钥」的范围，属安全降级，应与用户确认后再做。★ 另注：本机 `screencapture` / cua-driver 全屏截图被系统 SIGKILL(137)（注入变量为空，非污染）→ GUI 操作只能走 AX 通道（`osascript` + System Events），这也是能自动处理弹窗的原因。★ 弹窗处理脚本放项目 `tools/`，口令只在本地文件与脚本内部流转，不打印、不入库。"
     },
     {
       "id": "feat-117",

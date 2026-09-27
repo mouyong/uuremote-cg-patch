@@ -603,7 +603,7 @@ PY
 }
 
 
-# ★★ 免弹窗安装：若本地放了钥匙串口令，先把【登录钥匙串】解锁。
+# ★★ 免弹窗安装（第一步）：若本地放了钥匙串口令，先把【登录钥匙串】解锁。
 #
 # 背景：签名时 codesign 要取私钥，钥匙串 ACL 会弹出「…想要使用钥匙串中的密钥」+
 #   密码输入框（选项 允许 / 始终允许 / 拒绝）。脚本自己的临时钥匙串口令是写死的
@@ -611,9 +611,14 @@ PY
 #   没人点它就卡在安装中间 —— 而这是无人值守场景（远端/夜里）最容易卡住的地方。
 #
 # 做法：口令放本地文件 .local/keychain-pw（600 权限、.gitignore 已覆盖、绝不入 git）。
-#   这里读出来用它解锁登录钥匙串 → codesign 静默通过 → 全程无弹窗。
-#   没有该文件时**保持原状**（照旧弹窗、需人工点），不改变原有行为。
-# 恢复：删掉该文件即回到「弹窗人工处理」；macOS 在锁屏/注销时也会重新锁上钥匙串。
+#   这里读出来用它解锁登录钥匙串。
+#
+# ★★ 但实测证明：**解锁钥匙串 ≠ 授予 ACL 授权**（2026-09-28）。
+#   预解锁只让签名能读到私钥（消除 codesign 因钥匙串锁着而报 errSecInternalComponent），
+#   而重签后 UU 再读它自己的密钥 com.netease.uuremote 时，系统仍会问
+#   「这个 app 能不能读这把密钥」——**锁着与没授权是两回事**，该弹窗照样出现。
+#   所以真正管用的组合是：本函数（解锁）+ dialog_watcher_start（自动应答）。
+# 恢复：删掉口令文件即回到「弹窗人工处理」；macOS 在锁屏/注销时也会重新锁上钥匙串。
 preunlock_login_keychain() {
   local f="$D/.local/keychain-pw" pw kc
   [ -r "$f" ] || return 0
@@ -632,9 +637,45 @@ preunlock_login_keychain() {
 }
 
 
+# ★★ 免弹窗安装（第二步）：安装期间自动应答「钥匙串授权弹窗」。
+#
+# 为什么光解锁不够：见上面 preunlock_login_keychain 的说明 —— 重签后系统还会问
+#   「这个 app 能不能读 com.netease.uuremote 这把密钥」，那是一次 ACL 授权，
+#   与钥匙串是否解锁无关。没人点，安装就停在半路（实测：安装进程卡住、UU 组件
+#   读不到密钥 → 被控服务起不来 → 设备显示离线）。
+#
+# 做法：安装/签名期间后台起一个 AppleScript 轮询（见 tools/uu-dialog-responder.applescript），
+#   发现该弹窗就填入登录口令并点「始终允许」。
+#   ★ 口令只从本地文件 .local/keychain-pw 读入内存，不打印、不进日志、不入 git。
+#   ★ 没有口令文件 → 不起守护（保持原行为：人工点），也绝不向用户索取口令。
+#   ★ 只认「钥匙串 + 机密信息/想要」这类文案，别的系统弹窗不碰。
+#   ★ 安装结束（含出错退出）必须停掉，靠 trap 兜底。
+DIALOG_WATCH_PID=""
+dialog_watcher_start() {
+  local f="$D/.local/keychain-pw" scr="$D/tools/uu-dialog-responder.applescript"
+  [ -r "$f" ] || return 0
+  [ -f "$scr" ] || return 0
+  # ★ 必须以**真实用户**身份起（as_user）：弹窗长在用户的 GUI 会话里，
+  #   System Events 的辅助功能授权也是给这个用户的；以 root 跑 osascript 点不到它。
+  as_user osascript "$scr" "$f" "${UU_DIALOG_WATCH_SECS:-900}" >>/tmp/uu-dialog-responder.log 2>&1 &
+  DIALOG_WATCH_PID=$!
+  ok "已挂上弹窗自动应答（授权框会自动填口令并点「始终允许」）"
+}
+
+dialog_watcher_stop() {
+  [ -n "${DIALOG_WATCH_PID:-}" ] || return 0
+  # 两层保险：先 kill 记录的 pid；再按**唯一脚本名**兜底（sudo -u 起的子进程，
+  # 只 kill sudo 包装进程不一定会带走 osascript）。
+  kill "$DIALOG_WATCH_PID" 2>/dev/null || true
+  wait "$DIALOG_WATCH_PID" 2>/dev/null || true
+  pkill -f "uu-dialog-responder.applescript" 2>/dev/null || true
+  DIALOG_WATCH_PID=""
+}
+
 setup_keychain() {
   hd "准备独立签名钥匙串（避免 root 读不到登录钥匙串 → errSecInternalComponent）"
   preunlock_login_keychain
+  dialog_watcher_start
   as_user security delete-keychain "$KC" 2>/dev/null || true
   as_user security create-keychain -p "$KC_PASS" "$KC" || { no "创建钥匙串失败"; exit 1; }
   ok "已创建 $KC"
@@ -672,6 +713,11 @@ teardown_keychain() {
 
 
 cleanup() {
+  # ★ 这里必须也停掉弹窗自动应答，而不是只在顶层挂 EXIT trap：
+  #   本函数被 `trap cleanup EXIT` 注册（在 sign_main 里），**会覆盖**顶层那条 trap
+  #   （bash 的 trap 同名信号是「后者覆盖前者」，不是叠加）→ 实测装完应答器还在空转。
+  #   收口到一处，所有退出路径（正常/报错/中断）都覆盖。
+  dialog_watcher_stop
   if [ "$RESTORE_OWNER_NEEDED" -eq 1 ]; then
     chown -R root:wheel "$APP" 2>/dev/null && echo "（已恢复 App 属主 root:wheel）"
   fi
@@ -2537,6 +2583,12 @@ UU远程 修复工具集 —— 单文件入口
       CoreGraphics 采集器但工厂函数永远选不到，故需打补丁。详见 README.md。
 EOT
 }
+
+# ---------------------------------------------------------------------------
+# 收尾兜底：安装/签名期间挂起的弹窗自动应答必须随本进程结束而停掉，
+# 否则它会空转 15 分钟（虽然无害，但会一直持有 osascript 进程）。
+# ---------------------------------------------------------------------------
+trap 'dialog_watcher_stop' EXIT
 
 # ---------------------------------------------------------------------------
 # 子命令分派
