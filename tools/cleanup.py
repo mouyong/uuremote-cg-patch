@@ -35,8 +35,9 @@ def size_of(path):
 def refs(basename):
     """全仓「真代码」引用计数（只算 .sh/.py，不算 .md 的史料记载）
 
-    ★ 必须排除本脚本自己：它的 ARCHIVE_LIST 里写着这些文件名，
-      grep 一定会命中 → 全部误报「有引用」（自测时踩到过）。
+    ★ 保留此函数供后续扩充清理清单时使用（新增单个文件到 ARCHIVE_GROUP 前，
+      先手动确认它没被别的脚本引用）。
+    ★ 必须排除本脚本自己：清单里写着这些文件名，grep 一定会命中 → 全部误报。
     """
     out = _grep(basename)
     n = 0
@@ -63,56 +64,28 @@ ARCHIVE = os.path.join(ROOT, "archive", time.strftime("%Y%m%d"))
 
 # ---------- A. 直接删除（垃圾 / 可再生成的构建产物）----------
 DELETE = [
-    ("--analyze.stack",            "0 字节的误建文件（某个命令把 --analyze 当文件名了）"),
-    ("app-bundle-backup",          "空目录（残留）"),
-    ("stage",                      "整包构建产物：tools/stage-app-bundle.sh 每次 rm -rf 后重建"),
+    ("__pycache__",              "Python 字节码缓存（可随时重建）"),
+    ("tools/__pycache__",        "Python 字节码缓存（可随时重建）"),
+    ("libstreamer.dylib.patched", "补丁库产物：uu.sh cg-install 每次由 patch_tool.py 重新生成"),
+    ("shim/libuushim_v14.dylib", "与 shim/libuushim.dylib 字节完全相同（纯重复，违反「只留现役版+上一版」）"),
+    ("--analyze.stack",          "0 字节的误建文件（某个命令把 --analyze 当文件名了）"),
+    ("stage",                    "整包构建产物（如存在）"),
+    ("app-bundle-backup",        "整包备份残留（如存在）"),
 ]
 
-# ---------- B. 归档（陈旧实验产物，保留可查）----------
-ARCHIVE_LIST = [
-    # 旧 shim 版本（保留 v13=上一版、v14=现役）
-    "shim/libuushim_v6_shipped.dll.bak",
-    "shim/libuushim_v8.dylib",
-    "shim/libuushim_v9.dylib",
-    "shim/libuushim_v10.dylib",
-    "shim/libuushim_v11.dylib",
-    "shim/libuushim_v12.dylib",
-    # Sept-14 那轮 interpose 实验的中间产物
-    "shim/harness_mid",
-    "shim/harness.c",
-    "shim/harness_mid.c",
-    "shim/libmid.c",
-    "shim/libmid.dylib",
-    "shim/uushim.c",
-    "shim/measure.sh",
-    "shim/harness3-结果-20260914-1804.log",
-    "shim/rehearsal-20260914-1700.log",
-    "shim/rehearsal-20260914-184520.log",
-    "shim/rehearsal-v2-20260914-1716.log",
-    "shim/rehearsal-v3-20260914-1736.log",
-    "shim/rehearsal-v4-20260914-1806.log",
-    "shim/rehearsal-v4-20260914-1809-ok.log",
-    "shim/rehearsal-v5-20260914-1819-ok.log",
-    "shim/rehearsal-v5-20260914-1819.log",
-    "shim/rehearsal-v5-复核-1825.log",
-    "shim/rehearsal-v6-1837.log",
-    "shim/rehearsal-v6-ok-1841.log",
-    "shim/shim-log-v2-实测-20260914-1736.log",
-    "shim/shim-log-v4-会话-1811.log",
-    "shim/卡死采样-20260914-1804.txt",
-    "shim/采样-v4-卡CFRelease-1811.txt",
-    # evidence 里的原始大转储（结论已写进 .md）
-    "evidence/sample-卡空转-2321.txt",
-    "evidence/shim-2321.log",
-    "evidence/sp8.stack",
-    "evidence/th.stack",
-    # 无人引用的历史工具
-    "tools/lint-scripts.sh",
-    "tools/screen-change.py",
-    "tools/uu-autowatch.sh",
-    "tools/uu-forensics.sh",
-    "tools/uu-live-trace.sh",
-    "tools/uu-session-watch.sh",
+# ---------- B. 整组归档（互为引用、外部无引用的整套路线）----------
+# ★ 为什么按「组」而不是逐个：这类文件互相 bash 调用，逐个检查引用时 refs() 会把
+#   彼此算成「被引用」而拒绝移动（死循环）。它们是一整套路线，要么全留要么全走。
+ARCHIVE_GROUP = [
+    # 免 sudo「整包换位」装机路线：README 从未承认、从未实际使用
+    # （stage/ 与 app-bundle-backup/ 两个产物目录始终不存在），
+    # 功能已被 uu.sh 的 install / restore 取代。
+    "tools/stage-app-bundle.sh",
+    "tools/install-app-bundle.sh",
+    "tools/restore-app-bundle.sh",
+    # 同组的验证脚本：唯一引用者就是上面的 install-app-bundle.sh，
+    # 整组移走后即成孤儿；且功能与 uu.sh 的 encoder / verify 子命令重叠。
+    "tools/uu-verify-encoder.sh",
 ]
 
 print("=" * 68)
@@ -135,20 +108,12 @@ for rel, why in DELETE:
         else:
             os.remove(p)
 
-print("\n【B】归档：陈旧实验产物（移到 archive/，可随时取回）")
+print("\n【B】整组归档：互为引用的整套路线（一并移走）")
 moved = 0
-skipped_ref = []
-for rel in ARCHIVE_LIST:
+for rel in ARCHIVE_GROUP:
     src = os.path.join(ROOT, rel)
     if not os.path.exists(src):
         print(f"  – 跳过（不存在）: {rel}")
-        continue
-    base = os.path.basename(rel)
-    # 真代码引用（.sh/.py，排除本脚本与文档）才阻止归档
-    hard_ref = refs(base)
-    if hard_ref:
-        skipped_ref.append((rel, hard_ref))
-        print(f"  ⚠ 保留（被 {hard_ref} 个脚本引用）: {rel}")
         continue
     s = size_of(src)
     dst = os.path.join(ARCHIVE, rel)
@@ -161,10 +126,6 @@ for rel in ARCHIVE_LIST:
 
 print("\n" + "=" * 68)
 print(f"删除/归档合计释放: {human(freed)}   归档文件数: {moved}")
-if skipped_ref:
-    print("因被引用而保留：")
-    for rel, n in skipped_ref:
-        print(f"  · {rel}（{n} 处引用）")
 if not APPLY:
     print("\n【演练模式】未做任何改动。加 --apply 实际执行。")
 else:

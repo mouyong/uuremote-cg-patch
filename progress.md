@@ -115,15 +115,38 @@ bash uu.sh watchdog --dry
 
 按 `feature_list.json` 挑**一个** `not-started` 工作项。当前优先级建议：
 
-1. **feat-102**（`uu.sh reset` 脚枪）—— 唯一还在的「会误伤用户」的缺陷，改动小。
-2. **feat-106 / feat-107**（清理产物 / 关 Docker K8s）—— 低风险，回收内存与体积。
+1. **feat-102**（`uu.sh reset` 脚枪）—— 唯一还在的「会误伤用户」的缺陷：它按 `%cpu`（生命周期均值）
+   判「卡死」而不看在不在出帧，会把正在串流的用户踢下线。改动小，建议先做。
+2. **feat-107**（关 Docker 的 KubernetesEnabled）—— 低风险，省约 1.7GB 内存。
 3. **feat-105**（上游 PR）—— 需要先确认用户意愿。
+4. **feat-104**（推送仓库到远端）—— 等用户给的仓库名与「公开/私有」决定；代码侧已就绪。
 
 `blocked` 项不要自行推进，等用户答复（见 `session-handoff.md` 的 Blockers）。
 
 ---
 
 ## 历史会话（追加式，倒序）
+
+### 2026-09-27 · 仓库瘦身 + 发布前复核
+
+- **清掉写死的本机路径**：`~/.hermes/uuremote-cg-patch` 全库 20 处（AGENTS.md / session-handoff.md /
+  shim/README.md / evidence 6 文件）→ 相对路径或「本项目根目录」。`~/Library/...` 系统路径**不动**（谁都用得上）。
+- **克隆实测抓出 5 个问题**（这才是真验收 —— 只含 git 里的文件 = GitHub 用户拿到的内容）：
+  ① `init.sh` 在新克隆里必然 FAIL（检查 `libstreamer.dylib.orig` 等 **gitignore 掉的原厂备份**，
+  它们由首次 install 自动生成 → 改为 WARN）；② 我上一轮"修"的 `archive/` 引用反成新死链
+  （archive/ 被 gitignore，发布版没这个目录）；③ 3 份 evidence 把 `launchctl setenv DYLD_INSERT_LIBRARIES`
+  写成复现步骤（实测一天 141 份系统崩溃的做法）→ 加弃用警告；④ `uu.sh help` 还在说被实测推翻的
+  「setmode 提帧率最有效」；⑤ **门禁盲区**：`init.sh` 私钥检查用 `$(git ls-files)`，git 把中文名
+  转义成 `\346\240...` → 静默跳过全部中文名文件（44 个只真扫到 37 个）。
+- **门禁注入测试**（按规矩必须做）：往中文名 `.txt` 与 `.md` 各注入一条假私钥 →
+  **旧逻辑 0/2 全漏，新逻辑 2/2 全中**；同时取消扩展名白名单（私钥贴进 README 也要能抓）。
+- **提交身份统一**：11 个提交改写为 `mouyong <10336437+mouyong@users.noreply.github.com>`；
+  逐个 tree 哈希核对**只换身份、代码零改动**；留标签 `pre-identity-rewrite` 作退路。
+- **仓库瘦身**：跟踪文件 44→39。删 25MB 可重建产物 + 纯重复 dylib（**先证明可重建**：
+  `patch_tool.py patch` 产出与现有产物逐字节相同）；整组归档从未使用的免 sudo「整包换位」路线
+  + 重叠的验证脚本（`archive/20260927/tools/`）；刷新 `tools/cleanup.py` 的过期清单
+  （原清单 30+ 条指向早已不存在的文件 → `uu.sh cleanup` 永远报「无事可做」，等于废功能）。
+- 收尾：`./init.sh` 全绿、`./test.sh` PASS、干净克隆里两者同样通过。
 
 ### 2026-09-26 · 脚本整合 + 放 GitHub
 
