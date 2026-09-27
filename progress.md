@@ -371,3 +371,82 @@ stop，free 会 use-after-free），但**大块内存立刻还回去**。释放�
 故障时段约 **36% 的连接拿不到缓冲 → 采集线程不启动 → 客户端永远没画面**，
 正好对应「别的设备连上去没有画面」（时好时坏、越用越坏——因为显存被逐步吃掉）。
 修复后 8+8 轮连断 churn 全部成功启动，零失败。
+
+---
+
+## 2026-09-28 后半段：「无法连接至服务器 1001 / 连上没画面」第二条真根因 = 重签削掉了 GUI 权限
+
+### 症状（用户原话）
+
+「uuyc 还是没画面，并且软件显示连不上」、「被控端显示无法连接到服务器」、
+「刚启动软件的时候有网络，启动一会儿之后就变成连不上」。
+
+### 现场取证（可复现）
+
+| 观测 | 108（故障） | 101（官方对照） |
+|---|---|---|
+| GUI 每 3 秒连 `com.uuremote.agent.controller` | **全部被拒**（20~115 次/分） | **0 次** |
+| 界面 | 红框「无法连接至服务器 / 错误码：1001」 | 无 |
+| 进程网络 | GUI 连接反复建立又断 | 稳定 |
+
+- 逐秒记录复现了用户说的「启动一会儿就连不上」：启动 4 条连接 → 74 秒后掉到 1 条。
+- 曾被误判为「UU 自身轮询噪声」（**已撤回**）：101 上同类拒绝为 **0**，所以它是真故障。
+- 也排除了：代理（关掉仍在）、DNS、带宽、XPC 身份（plist 指定 `XPC_SERVICE_NAME` 被 launchd 覆盖）、
+  LaunchAgent 抢占（撤掉后照旧拒）。
+
+### 真根因（反汇编 + 跨机对照定位）
+
+UU 在**运行时校验 XPC 客户端**：`UURemoteService` 里
+`verifyHardenedRuntimeAndEntitlements(secStaticCode:)` → `SecRequirementCreateWithString`
+（模板只有 `certificate leaf[subject.OU] =`，**没有** anchor）+ `SecCodeCheckValidity`。
+校验不过就 `xpc_connection_cancel()` 把连接拒掉。
+
+**而我们的重签把 GUI 的权限削没了**：
+
+| 组件 | 108（故障时） | 101（官方） |
+|---|---|---|
+| `UURemote`（GUI） | **（空）** | `audio-input` + `bluetooth` |
+| `UURemoteServer` | `disable-library-validation` + `audio-input` | `audio-input` |
+
+成因是脚本自身的 bug：`$ENTS = UURemote.entitlements` 全脚本**只被 `[ -f ]` 检查存在、
+从未进 `--entitlements`**；而 `sign_one` 的并集只取「①该文件当前权限 ②同名 .orig 备份 ③extra-ents/」，
+GUI 没有 .orig 备份 → 一旦被削掉就**永久丢失且永不自愈**（每次都以已削过的当前值为基准）。
+
+### 修复
+
+1. **`uu.sh` / `sign_one`**：把官方权限集文件 `$ENTS` 纳入合并来源（仅主程序 `UURemote`）。
+2. 顺带发现 UU 的**禁用权限黑名单**（别让它扩散到别的组件）：
+   `disable-library-validation`、`get-task-allow`、`allow-jit`、
+   `allow-dyld-environment-variables`、`allow-unsigned-executable-memory`。
+3. 重签后 UU 会再问一次钥匙串 ACL（「想要访问你的钥匙串中的密钥 com.netease.uuremote」），
+   用 `tools/uu-dialog-responder.applescript` 自动应答（填口令 + 点「始终允许」）即可。
+
+### 验证（改造后不动正式 App）
+
+```
+# ① 故意把副本 GUI 权限削掉，模拟故障态
+codesign -f -s - --options runtime /tmp/dry/UURemote.app/Contents/MacOS/UURemote
+# ② 演练重签 → 权限应被自动补回
+UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 bash uu.sh sign
+```
+
+输出含 `+ 权限：com.apple.security.device.audio-input,com.apple.security.device.bluetooth`，
+副本 GUI 权限恢复；**正式 App 未被触碰**。
+
+### 效果
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `UURemoteService` 拒绝 XPC | 20~115 次/分 | **0** |
+| `UURemoteDaemon` 拒绝 | 有 | **0** |
+| GUI 重连 `agent.controller` | 每 3 秒 | **0** |
+| 界面红框「无法连接至服务器 1001」 | 有 | **消失** |
+
+### 教训
+
+- **「某进程在报错」不等于「噪声」**：判定噪声前，必须在**官方对照机**上量同一指标（101 = 0）。
+- **权限这种东西要能被机器核对**：加权限断言（缺了就报错）+ 演练模式自测，
+  否则「签名通过」会掩盖「权限被削」，而故障表现完全不像权限问题（像网络问题）。
+- 反汇编定位手法留档：`otool -tvV -arch x86_64` + literal pool 注释定位 Swift 字符串
+  → 找 `SecCodeCheckValidity` 调用点 → 反查其调用者得到校验链。
+

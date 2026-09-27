@@ -765,6 +765,17 @@ sign_one() {
   [ -n "$origf" ] && srcs+=("$origf")
   [ -f "$extra" ] && srcs+=("$extra")
 
+  # ★★★ ④ 官方权限集文件（$ENTS）—— 只给主程序 UURemote（2026-09-28 新增）：
+  #   为什么必须有这一条：UURemote 的 audio-input/bluetooth **只登记在这个文件里**
+  #   （官方对照机 101：UURemote = audio-input + bluetooth；Server = audio-input；
+  #    Service/Daemon = 无）。而在此之前 $ENTS 全脚本只被「检查存在」、从未参与签名，
+  #   于是一旦某轮重签把 GUI 权限削掉，就再也回不来（每次都以已削过的版本为基准）。
+  #   代价极大 —— UU 自己的 verifyHardenedRuntimeAndEntitlements() 会校验 XPC 客户端
+  #   的权限，校验不过就把连接拒掉：GUI 每 3 秒重连一次、界面报「无法连接至服务器
+  #   1001」、会话永远完不成，**表现就是「别的设备连上来没有画面」**。
+  #   真机实测：补回这两个权限后，XPC 拒绝 20~115 次/分 → 0，界面红框消失。
+  [ "$(basename "$f")" = "UURemote" ] && [ -f "$ENTS" ] && srcs+=("$ENTS")
+
   if [ ${#srcs[@]} -gt 0 ]; then
     merged=$(as_user mktemp -t entsm) || merged=""
     if [ -n "$merged" ]; then

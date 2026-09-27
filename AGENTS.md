@@ -102,6 +102,24 @@ Before writing code:
     - 配套记账（`缓冲记账[...]：活跃 N 会话 / 约 X MB`）：会话中应显示 1 / 27.5MB，
       断开后应回到 0 / 0.0MB；**只涨不落就是又有新泄漏**。加记账是为了让这种「静默故障」
       变成机器能核对的数（人眼看日志只会看到一切正常）。
+18. **重签必须保住官方权限集 —— `UURemote.entitlements` 要真的参与签名，不能只「检查存在」。**
+    UU 会在**运行时校验 XPC 客户端**（`verifyHardenedRuntimeAndEntitlements(secStaticCode:)`），
+    校验不过就直接把连接拒掉 —— **这是「别的设备连上来没有画面」的另一条真根因**。
+    - 官方权限对照（101 官方机实测）：`UURemote` = `audio-input` + `bluetooth`；
+      `UURemoteServer` = `audio-input`；`UURemoteService` / `UURemoteDaemon` = 无。
+    - UU 代码里另有一份**禁用权限黑名单**：`disable-library-validation`、`get-task-allow`、
+      `allow-jit`、`allow-dyld-environment-variables`、`allow-unsigned-executable-memory`
+      （外加「because the debugger is attached」）。我们给 server 加的
+      `disable-library-validation` 正在名单里 —— 别让它扩散到别的组件。
+    - 事故经过：`$ENTS` 曾只被 `[ -f ]` 检查、**从未进 `--entitlements`**，于是 GUI 的权限
+      在一轮重签里被永久削掉（每次都以「已削过的当前值」为基准，永不自愈）。
+      后果：Service 每 3 秒拒一次 GUI 的 XPC（**20~115 次/分**）、界面报
+      「无法连接至服务器 / 错误码 1001」、会话永远完不成 → 客户端黑屏。
+      补回这两个权限后：**XPC 拒绝归零、界面红框消失**。
+    - 改签名逻辑后必做的机器核对（不动正式 App）：
+      `UURT_APP=<App副本> UURT_REHEARSE=1 bash uu.sh sign` → 输出里必须出现
+      `+ 权限：com.apple.security.device.audio-input,com.apple.security.device.bluetooth`（GUI）。
+    - 排查口诀：**G（GUI）权限空、S（Service）每 3 秒拒** → 先查权限集，别去猜网络/代理。
 
 ## Working Rules（工作规则）
 
