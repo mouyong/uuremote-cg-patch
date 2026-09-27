@@ -1741,15 +1741,54 @@ reset_main() {
 # 占着会话位导致手机再连就连不上。
 #
 # 用法：
-#   sudo bash uu.sh reset          # 执行
+#   sudo bash uu.sh reset          # 执行（检测到正在出帧则拒绝，原因见下）
 #   sudo bash uu.sh reset --dry    # 只看状态不改动
+#   sudo bash uu.sh reset --force  # 明知有会话仍要重启（会踢掉正在用的客户）
+#
+# ★★ 为什么默认会拒绝：**高 CPU 本身不是「卡死」的证据** ——
+#   本机没有硬件编码器，活跃会话里软编正当要烧 200%+ CPU。
+#   旧版只看「CPU ≥ 20% 就杀」，于是**客户正在用时执行 reset 会把画面掐断**。
+#   判据改为与 watchdog 同一条铁律：**还在出帧就绝不动它**。
+#   帧信号取自 shim 日志的 `出帧 #` 行时间戳（超过 STREAMING_SEC 无帧才算可疑）。
+#
+# 退出码：0 = 已重启 / 空跑（--dry）；3 = **已拒绝**（在出帧，未做任何改动，非故障）。
 #
 # 还原说明：本脚本不修改任何文件，只重启一个进程。
 #   它没有「撤销」动作 —— 执行效果就是「helper 被重启」。
 #   如果想彻底退出改动（移除我们的补丁），用：
 #     sudo bash uu.sh shim-restore
-DRY=0
-[ "${1:-}" = "--dry" ] && DRY=1
+DRY=0; FORCE=0
+# ★ 两个坑：① 调度器传的是 "${2:-}"，无参时也会来一个**空串** → 必须跳过，
+#   否则 `bash uu.sh reset` 会被当「未知参数」拒掉；
+#   ② 变量后面紧跟全角括号必须写 ${_a}：bash 在 set -u 下会把 `（` 并进变量名，
+#   报 `_a: unbound variable` 并**在参数解析处就退出**（实测踩过）。
+for _a in "$@"; do
+  [ -z "$_a" ] && continue
+  case "$_a" in
+    --dry)   DRY=1 ;;
+    --force) FORCE=1 ;;
+    *) echo "未知参数：${_a}（可用：--dry / --force）" >&2; exit 2 ;;
+  esac
+done
+# 与 watchdog 同源：帧日志路径与「多久没帧算停流」
+SHIM_LOG="${UU_SHIM_LOG:-/tmp/uushim.log}"
+STREAMING_SEC="${UU_STREAMING_SEC:-15}"
+STREAMING=0
+
+# ---------- 在出帧判据（与 watchdog 的 LAST_FRAME_SEC 同一算法）----------
+# ★ 必须把 HH:MM:SS 转秒再相减：跨午夜时字符串比较会把昨天的帧算成最近（实测踩过）。
+last_frame_sec() {
+  [ -f "$SHIM_LOG" ] || { echo 99999; return; }
+  local lft d
+  lft=$(grep -a '出帧 #' "$SHIM_LOG" 2>/dev/null | tail -1 | cut -c1-8 || true)
+  case "$lft" in
+    [0-9][0-9]:[0-9][0-9]:[0-9][0-9])
+      d=$(( $(to_sec "$(date +%H:%M:%S)") - $(to_sec "$lft") ))
+      [ "$d" -lt 0 ] && d=$((d + 86400))
+      echo "$d" ;;
+    *) echo 99999 ;;
+  esac
+}
 
 
 PIDF=/Users/Shared/UURemote/Shared/.active_pid
@@ -1763,8 +1802,14 @@ else
     echo "  helper: $INFO"
     CPU=$(ps -p "$PID" -o %cpu= 2>/dev/null | tr -d ' ')
     INT=${CPU%%.*}
-    if [ "${INT:-0}" -ge 20 ] 2>/dev/null; then
-      no "CPU ${CPU}% —— 疑似卡死空转（就是「连不上」的原因）"
+    LFS=$(last_frame_sec)
+    if [ "$LFS" -le "$STREAMING_SEC" ]; then
+      # ★ 在出帧：CPU 高是软编的正常开销，不是卡死 —— 绝不能杀（会掐断客户会话）
+      STREAMING=1
+      ok "正在出帧（${LFS}s 前还有帧）—— CPU ${CPU}% 是软编正常开销，不是卡死"
+      echo "     判据：shim 日志最近一行 \`出帧 #\` 距今 ${LFS}s（阈值 ${STREAMING_SEC}s）"
+    elif [ "${INT:-0}" -ge 20 ] 2>/dev/null; then
+      no "CPU ${CPU}% 且已 ${LFS}s 无帧 —— 疑似卡死空转（就是「连不上」的原因）"
       STUCK=1
     else
       ok "CPU ${CPU}% —— 空闲正常"
@@ -1783,6 +1828,17 @@ ps -Ao pid,%cpu,time,comm 2>/dev/null | grep UURemoteServer | grep -v grep | sed
 if [ "$DRY" = "1" ]; then
   hd "演练模式：不杀任何进程"
   exit 0
+fi
+
+# ★★ 闸：正在出帧就拒绝（除非 --force）
+if [ "$STREAMING" = "1" ] && [ "$FORCE" != "1" ]; then
+  hd "已拒绝：helper 正在出帧，未做任何改动"
+  echo "  画面正在正常输出，重启会**当场踢掉正在使用的客户**。"
+  echo "  CPU 高在这是软编的正常开销（本机无硬件编码器），不等于卡死。"
+  echo
+  echo "  确认要重启（例如画面已卡但日志仍在刷帧）：sudo bash uu.sh reset --force"
+  echo "  只看状态不改动：                            sudo bash uu.sh reset --dry"
+  exit 3
 fi
 
 hd "重启 helper"
@@ -2084,6 +2140,7 @@ cmd_install_all() {
   cpupath_install_main
   hd "完成 —— 现在去手机端连一次"
   echo "  看不到画面时：bash $D/uu.sh status  →  然后 sudo bash $D/uu.sh reset"
+  echo "  （reset 会在检测到「正在出帧」时拒绝 —— 那多半不是被控端的问题；"--force" 可强制）"
 }
 
 cmd_restore_all() {
@@ -2137,7 +2194,7 @@ UU远程 修复工具集 —— 单文件入口
 【日常】
   status              综合状态总览：补丁 / shim / 进程 / 看门狗 / 内存（免 sudo，最常用）
   verify              查日志，看 UU 实际走了哪套采集器（免 sudo）
-  reset [--dry]       重启卡死的 helper（「连不上」先试它）        [sudo]
+  reset [--dry|--force] 重启卡死的 helper（在出帧则拒绝；--force 强制）  [sudo]
   daemon              重启 root 守护进程（修「无法连接至服务器 1001」）[sudo]
 
 【安装 / 还原】（重装 UU、UU 自动更新覆盖补丁之后）

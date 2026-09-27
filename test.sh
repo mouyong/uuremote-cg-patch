@@ -103,6 +103,49 @@ else
   echo "  [SKIP] 本机没有 uuyc-cli（未装 UU？）"
 fi
 
+# ---------- ③ reset 安全闸回归（feat-102）----------
+# 为什么测试要**成对**：闸如果写成「永远拒绝」，那「在出帧时不杀」这条照样通过 —— 假绿。
+# 所以必须同时证明「已经不出帧时确实会动手」。
+# 全程用替身进程 + 临时日志，不碰真 helper；.active_pid 用 trap 保证还原。
+echo "--- reset 安全闸回归（feat-102）---"
+PIDF=/Users/Shared/UURemote/Shared/.active_pid
+if [ -e "$PIDF" ] && [ -w "$PIDF" ]; then
+  cp -p "$PIDF" /tmp/.uu-gate-pidbak
+  gate_restore() { cp -p /tmp/.uu-gate-pidbak "$PIDF" 2>/dev/null || true; }
+  trap gate_restore EXIT
+  GLOG=/tmp/.uu-gate-fake.log
+
+  # $1=期望退出码  $2=fresh|stale  $3=期望替身存活(1/0)  $4=说明  $5..=额外参数（如 --force）
+  gate_case() {
+    local want_rc="$1" log_kind="$2" want_alive="$3" what="$4" decoy rc alive
+    shift 4   # ★ 必须把额外参数透传下去：漏了的话「--force 用例」其实跑的是无参数版本，
+              #   用例照样「通过/失败」但测的不是它声称的东西（本用例第一版就栽在这）。
+    decoy=$(python3 -c "import subprocess;p=subprocess.Popen(['sleep','60'],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print(p.pid)")
+    echo "$decoy" > "$PIDF"
+    if [ "$log_kind" = "fresh" ]; then
+      printf '%s  出帧 #1/9999  fmt=420v 1600x900 亮度=29.0 脏矩形=1 回调进2/出2 待回0 延迟0ms(峰1) 状态[1,0,0,0]\n' \
+        "$(date +%H:%M:%S)" > "$GLOG"
+    else
+      printf '00:00:01  出帧 #1/9999  fmt=420v 1600x900 亮度=29.0 脏矩形=1 回调进2/出2 待回0 延迟0ms(峰1) 状态[1,0,0,0]\n' > "$GLOG"
+    fi
+    UU_SHIM_LOG="$GLOG" bash "$BASE/uu.sh" reset "$@" >/dev/null 2>/tmp/.uu-gate.err; rc=$?
+    kill -0 "$decoy" 2>/dev/null && alive=1 || alive=0
+    kill -TERM "$decoy" 2>/dev/null || true
+    gate_restore
+    # ★ 变量后紧跟全角标点必须写 ${var}：set -u 下 `$what：` 会被当成变量名
+    #   `what：` → unbound variable，崩在报错信息处（正是最需要它说话的时候）。
+    if   [ "$rc" != "$want_rc" ];        then bad "${what}：期望退出码 ${want_rc}，实际 ${rc}"
+    elif [ "$alive" != "$want_alive" ];  then bad "${what}：替身存活=${alive}，期望 ${want_alive}"
+    else pass "$what"; fi
+  }
+
+  gate_case 3 fresh 1 "在出帧时拒绝执行、不误杀（退出码 3）"
+  gate_case 0 stale 0 "已停帧时照常重启（退出码 0，替身被终止）"
+  gate_case 0 fresh 0 "--force 时绕过闸（退出码 0，替身被终止）" --force
+else
+  skip "无法写 ${PIDF}（缺权限）→ 跳过 reset 闸回归"
+fi
+
 if [ "$LOCAL_ONLY" = "1" ]; then
   echo
   echo "--- --local-only：跳过端到端 ---"

@@ -59,7 +59,7 @@ for p in patch_tool.py tools/cleanup.py tools/insert_dylib.py; do
   if python3 -c 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")' "${p}" 2>/dev/null; then
     ok "语法 $p"
   else
-    bad "语法 $p（Python 解析失败）"
+    bad "语法 ${p}（Python 解析失败）"
   fi
 done
 if [ -f shim/libuushim.c ]; then

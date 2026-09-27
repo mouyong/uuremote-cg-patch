@@ -92,8 +92,8 @@
       "dependencies": [
         "feat-004"
       ],
-      "status": "not-started",
-      "evidence": ""
+      "status": "done",
+      "evidence": "已修：判据从 ps %cpu（生命周期均值）改为 shim 日志 `出帧 #` 的最新时间戳，与 watchdog 同一算法（含跨午夜回绕、以墙钟为基准）。新增 --force；退出码 0=已重启/空跑、3=已拒绝（在出帧、未做任何改动）。★ 成对注入测试（替身进程 + 伪造日志，不碰真 helper，.active_pid 用 trap 还原）：在出帧 → rc=3 且替身存活；已停帧 → rc=0 且替身被终止；--force → rc=0 且替身被终止。反向用例不可省 —— 只测「不杀」的话，「永远拒绝」的坏闸同样会通过（假绿）。test.sh 新增「③ reset 安全闸回归」三条用例。附带修：uu.sh 在 set -uo pipefail 下会把变量后紧跟的全角括号并进变量名（`$_a（` → `_a: unbound variable`，且崩在参数解析处、测试看似「闸生效」实为早退），已改 ${_a} 并跳过调度器传来的空串。"
     },
     {
       "id": "feat-103",
@@ -110,8 +110,8 @@
       "dependencies": [
         "feat-006"
       ],
-      "status": "blocked",
-      "evidence": "仓库已就绪（4 个提交、工作区干净、0 私钥）。阻塞：等用户定账号与身份"
+      "status": "done",
+      "evidence": "已完成：remote=git@github.com/mouyong/uuremote-cg-patch.git；本地 HEAD 与 origin/HEAD 一致（d171604）；23 个提交已推送。提交身份为 mouyong 的 GitHub noreply 地址（非占位值，全仓唯一）；原「等用户定账号与身份」已由用户确认。"
     },
     {
       "id": "feat-105",
@@ -136,8 +136,8 @@
       "name": "关闭 Docker 的 KubernetesEnabled",
       "description": "再启动 Docker 会白烧 1.7GB 内存 + 约 40% CPU（本机 8GB / 2 核，是帧率与内存压力的主要外因）",
       "dependencies": [],
-      "status": "not-started",
-      "evidence": "实测 VM 1748MB、AutoStart=False 不会自启；settings-store.json 里 KubernetesEnabled=True"
+      "status": "done",
+      "evidence": "已满足：settings-store.json 实测 KubernetesEnabled=False、AutoStart=False（不会自启）。★ 由用户在本机 Docker Desktop 界面手动完成，仓库内无对应代码改动，故本项无发布物。用户另把资源临时降为 1 CPU / 2048MB、关闭 DockerAI 与部分功能（「远程机器使用 docker」调研期间的临时调整，见 feat-113）—— 方案定了要一并说明这些临时设置是否恢复。"
     },
     {
       "id": "feat-108",
@@ -185,6 +185,16 @@
       ],
       "status": "done",
       "evidence": "uu.sh +383 行（1826→2209），bash -n 通过；`bash uu.sh cpupath-status` 真实跑通（报出补丁库在位 / UU plist 已注入 / 全局注入为空）；help 可见三个新子命令。删前可恢复性证明：三个脚本从历史取回行数吻合（186/96/64），v13 的 `git show f415dbd:shim/libuushim_v13.dylib | md5` 与工作区逐字节一致（5e14dd3f…）。12 处文档引用同步，死引用复查 0；init.sh 全通过。shim-restore 修复经双向注入测试：污染备份下修前会覆盖目标（内容被写掉）、修后拒绝覆盖且 md5 不变；干净备份下正常还原不受影响。"
+    },
+    {
+      "id": "feat-113",
+      "name": "通过命令在远程机器使用 docker",
+      "description": "让 Agent 能在别的机器上跑 docker（构建/运行/排查），而不是只能用本机 Docker Desktop。背景：本机是 2011 Mac mini（8GB / 2 核、无 Metal），本地跑容器本身就很吃资源 —— 用户已为此**临时**关闭 k8s 环境、把 Docker 降为 1 CPU / 2048MB、关闭 DockerAI 与部分功能。要点（动手前先定）：① 走哪条路连远程（已有 OpenVPN 10.0.50/24 与 SSH 免密可直接复用，或 docker context / DOCKER_HOST）；② 凭证与上下文如何隔离，别把某台的 registry 登录态带到另一台；③ 镜像在哪构建、怎么走 CCR（跨境拉取与推送的网络路径不同）；④ 本机是否还要保留本地 Docker，以及上面那批临时设置是否恢复。",
+      "dependencies": [
+        "feat-107"
+      ],
+      "status": "not-started",
+      "evidence": ""
     }
   ]
 }
