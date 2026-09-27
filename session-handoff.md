@@ -69,7 +69,9 @@ bash uu.sh status         # 项目运行态总览
 | `uu.sh` | **唯一入口**，19 个子命令 | 整合自原 9 个脚本，逻辑逐字保留未重写 |
 | `README.md` | 完整技术手册（根因、四个 bug 的查证过程、目录结构、陷阱） | 深水区问题查这里，不要另起文档 |
 | `init.sh` | 启动 / 验证入口（harness 的 verification） | 只读，不改系统状态 |
+| `test.sh` | **端到端验收测试**（本项目没有单元测试框架，此即其「测试」） | 自带安全闸：有人正在用时 SKIP |
 | `feature_list.json` | 工作项状态的唯一事实源 | 同时最多一个 `in-progress` |
+| `progress.md` | 会话连续性日志（倒序追加） | 与 skill 的分工：长期结论进技能，会话轨迹进这里 |
 | `cpupath/libuucpupath.c` | 第 4 道门：CPU 顶替 Metal 帧转换 | ★ 泄漏修复在 `my_CopyTo`：新出口必须 `goto out` |
 | `cpupath/install.sh` | 注入安装（写 UU 自己的 plist） | ★ 绝不许退回 `launchctl setenv` |
 | `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 现役 v14；备份 `v13` 作回退 |
