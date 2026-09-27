@@ -194,7 +194,7 @@
         "feat-107"
       ],
       "status": "not-started",
-      "evidence": ""
+      "evidence": "实测（2026-09-28，VPN 内 BatchMode 探测）：① `root@<VPN_IP>` server-openvpn — 4 核/3.4GB，**docker 27.2.0（现代版）**，是唯一开箱可用的；但它是本套组网的 VPN 服务器，在上面跑重构建有把网络搞瘫的风险。② `mouyong@<VPN_IP>` MacBook Air M2 — 8 核/16GB，算力最强但 **docker 未装/未启**（要装 Docker Desktop 或 colima）。③ `root@<VPN_IP>` k3s-node-1 — 2 核/7.7GB，docker **1.13.1**（2017 年版，跑不动现代 compose/buildkit）。④ `root@<VPN_IP>` k3s-master — 无 docker（k3s 用 containerd）。⑤ 公网 `k3s-master`(<CLOUD_IP>) — 2 核/2GB，无 docker。★ 关键动因：本机推 CCR 走跨境链路实测只有 **~2MB/s**（今天推 4.39GB 花了 30+ 分钟），若换到国内机器构建+推送，这一段成本几乎可以抹掉 —— 这是本项最大收益点，选机器时优先看「离 CCR 近」而不是「算力强」。★ 未知待定：那台机器的 CCR 登录态与 docker context 隔离方案（别把本机的 registry 凭证复制出去）。"
     },
     {
       "id": "feat-114",
