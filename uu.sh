@@ -603,8 +603,38 @@ PY
 }
 
 
+# ★★ 免弹窗安装：若本地放了钥匙串口令，先把【登录钥匙串】解锁。
+#
+# 背景：签名时 codesign 要取私钥，钥匙串 ACL 会弹出「…想要使用钥匙串中的密钥」+
+#   密码输入框（选项 允许 / 始终允许 / 拒绝）。脚本自己的临时钥匙串口令是写死的
+#   （P12PASS/KC_PASS），**不需要人工输入**；弹窗要的是**登录钥匙串**的口令。
+#   没人点它就卡在安装中间 —— 而这是无人值守场景（远端/夜里）最容易卡住的地方。
+#
+# 做法：口令放本地文件 .local/keychain-pw（600 权限、.gitignore 已覆盖、绝不入 git）。
+#   这里读出来用它解锁登录钥匙串 → codesign 静默通过 → 全程无弹窗。
+#   没有该文件时**保持原状**（照旧弹窗、需人工点），不改变原有行为。
+# 恢复：删掉该文件即回到「弹窗人工处理」；macOS 在锁屏/注销时也会重新锁上钥匙串。
+preunlock_login_keychain() {
+  local f="$D/.local/keychain-pw" pw kc
+  [ -r "$f" ] || return 0
+  pw="$(tr -d '\r\n' < "$f")"
+  [ -n "$pw" ] || { no "口令文件为空：$f"; return 0; }
+  for kc in "$HOME/Library/Keychains/login.keychain-db" "$HOME/Library/Keychains/login.keychain"; do
+    [ -e "$kc" ] || continue
+    if as_user security unlock-keychain -p "$pw" "$kc" 2>/dev/null; then
+      ok "登录钥匙串已提前解锁 → 本次安装不会再弹授权框"
+    else
+      no "登录钥匙串解锁失败（口令不对？）→ 安装时可能仍会弹窗，需人工点「始终允许」"
+    fi
+    return 0
+  done
+  no "找不到登录钥匙串（$HOME/Library/Keychains/）→ 保持原行为"
+}
+
+
 setup_keychain() {
   hd "准备独立签名钥匙串（避免 root 读不到登录钥匙串 → errSecInternalComponent）"
+  preunlock_login_keychain
   as_user security delete-keychain "$KC" 2>/dev/null || true
   as_user security create-keychain -p "$KC_PASS" "$KC" || { no "创建钥匙串失败"; exit 1; }
   ok "已创建 $KC"
@@ -655,33 +685,59 @@ sign_one() {
   local args=(--force --sign "$HASH" --keychain "$KC" --timestamp=none --options runtime)
   [ -n "$id" ] && args+=(--identifier "$id")
 
-  local e tmp="" merged="" extra="$D/extra-ents/$(basename "$f").plist"
+  local extra="$D/extra-ents/$(basename "$f").plist"
   # 还原时用 UURT_SKIP_EXTRA=1 让签名回到官方权限集（不带我们额外加的权限）
   [ "${UURT_SKIP_EXTRA:-0}" = "1" ] && extra="/dev/null"
-  e=$(codesign -d --entitlements :- "$f" 2>/dev/null || true)
-  if printf '%s' "$e" | grep -q '<plist'; then
-    tmp=$(mktemp /tmp/ents.XXXXXX.plist); printf '%s' "$e" > "$tmp"
+  local orig="$D/shim/backup/$(basename "$f").orig"   # 官方原版备份 = 权限的权威依据
+
+  # ★★★ entitlements 取**三个来源的并集**（缺一不可）：
+  #   ① 该文件当前签名上的 —— 平时就等于官方权限
+  #   ② 官方原版备份上的（同名 .orig）—— ★ 关键：权限一旦被某次安装削掉，
+  #      只以「当前」为基准就会**永久丢失且永不自愈**（每次都以已削过的版本为基准）。
+  #      实测踩过：UURemoteServer 的 com.apple.security.device.audio-input 就是这样丢的
+  #      —— 而当时的现场看不出任何异常，签名照样「通过」。
+  #   ③ 我们额外要加的（extra-ents/<文件名>.plist）
+  #   取并集而非「后者覆盖前者」：任一来源缺失或被削都能自动补回。
+  #
+  # 另注：mktemp 模板里的 X 必须**在结尾**。写 `mktemp /tmp/ents.XXXXXX.plist` 的实际后果：
+  #   第一次建出该**字面名**文件，之后每次都 `mkstemp failed: File exists` → 命令替换拿到
+  #   空串 → `--entitlements` 整条不传 → 权限被悄悄抹掉（这正是上面那个事故的成因）。
+  #   用 `-t <前缀>`（系统临时目录，X 在结尾）；并以**真实用户**创建 —— root 建的 600 文件，
+  #   随后 `sudo -u <用户> codesign` 读不到（会变成另一种假失败）。
+  local curf="" origf="" merged=""
+  if codesign -d --entitlements :- "$f" 2>/dev/null | grep -q '<plist'; then
+    curf=$(as_user mktemp -t entscur) || curf=""
+    [ -n "$curf" ] && codesign -d --entitlements :- "$f" 2>/dev/null > "$curf"
   fi
-  # 额外权限（$D/extra-ents/<文件名>.plist）：与原 entitlements 合并。
-  # 典型用途：UURemoteServer 需要 com.apple.security.cs.disable-library-validation
-  # 才能加载我们自签的 libuushim.dylib（签名者不同）。
-  if [ -f "$extra" ]; then
-    if [ -n "$tmp" ]; then
-      merged=$(mktemp /tmp/entsm.XXXXXX.plist)
+  if [ -f "$orig" ] && codesign -d --entitlements :- "$orig" 2>/dev/null | grep -q '<plist'; then
+    origf=$(as_user mktemp -t entsorig) || origf=""
+    [ -n "$origf" ] && codesign -d --entitlements :- "$orig" 2>/dev/null > "$origf"
+  fi
+
+  local srcs=()
+  [ -n "$curf" ]  && srcs+=("$curf")
+  [ -n "$origf" ] && srcs+=("$origf")
+  [ -f "$extra" ] && srcs+=("$extra")
+
+  if [ ${#srcs[@]} -gt 0 ]; then
+    merged=$(as_user mktemp -t entsm) || merged=""
+    if [ -n "$merged" ]; then
       if python3 -c 'import plistlib,sys
-a=plistlib.load(open(sys.argv[1],"rb")); b=plistlib.load(open(sys.argv[2],"rb"))
-a.update(b); plistlib.dump(a, open(sys.argv[3],"wb"))' "$tmp" "$extra" "$merged" 2>/dev/null; then
-        echo "    + 额外权限：$(python3 -c 'import plistlib,sys;print(",".join(plistlib.load(open(sys.argv[1],"rb")).keys()))' "$extra" 2>/dev/null)"
+out={}
+for p in sys.argv[1:-1]:
+    try:
+        d=plistlib.load(open(p,"rb"))
+    except Exception:
+        continue
+    if isinstance(d,dict): out.update(d)
+plistlib.dump(out, open(sys.argv[-1],"wb"))' "${srcs[@]}" "$merged" 2>/dev/null; then
+        echo "    + 权限：$(python3 -c 'import plistlib,sys;print(",".join(sorted(plistlib.load(open(sys.argv[1],"rb")).keys())))' "$merged" 2>/dev/null)"
       else
-        merged=""   # 合并失败则退回原 entitlements，不至于签出一个坏签名
+        merged=""   # 合并失败 → 宁可退回「不传 --entitlements」，也不签一个半成品
       fi
-    else
-      merged="$extra"
-      echo "    + 额外权限：$(python3 -c 'import plistlib,sys;print(",".join(plistlib.load(open(sys.argv[1],"rb")).keys()))' "$extra" 2>/dev/null)"
     fi
   fi
-  if [ -n "$merged" ]; then args+=(--entitlements "$merged")
-  elif [ -n "$tmp" ]; then args+=(--entitlements "$tmp"); fi
+  [ -n "$merged" ] && args+=(--entitlements "$merged")
 
   local out rc
   as_user security unlock-keychain -p "$KC_PASS" "$KC" >/dev/null 2>&1
@@ -691,8 +747,9 @@ a.update(b); plistlib.dump(a, open(sys.argv[3],"wb"))' "$tmp" "$extra" "$merged"
     out=$(codesign "${args[@]}" "$f" 2>&1); rc=$?
   fi
 
-  [ -n "$tmp" ] && rm -f "$tmp"
-  case "$merged" in /tmp/entsm.*) rm -f "$merged" ;; esac
+  [ -n "$curf" ] && rm -f "$curf"
+  [ -n "$origf" ] && rm -f "$origf"
+  [ -n "$merged" ] && rm -f "$merged"
   if [ $rc -eq 0 ]; then
     ok "$(basename "$f")  (id=${id:-auto})"
     return 0
@@ -1010,6 +1067,12 @@ else
 fi
 
 as_user open -a UURemote 2>/dev/null || open -a UURemote || true
+
+# ★ 关键补一步：`open -a UURemote` 只拉起 GUI/Service/Daemon，**不会起 UURemoteServer**。
+#   而 server 才是「设备在线」的载体（没它 → 别的设备看到离线、报 1001），
+#   且 UU 自己不会在需要时补起（实测等 60s 无动静）。上面第 8 步刚 pkill 过它，
+#   不补这一步 = 「签完名设备反而不上线」。详见 server_agent 那节注释。
+server_agent_up || true
 sleep 6
 
 echo
@@ -1053,6 +1116,185 @@ cat <<'EOT'
   sudo bash uu.sh cg-restore
 ────────────────────────────────────────────────────────────
 EOT
+}
+
+
+# ---- server_agent 系列（保证「设备在线」）----
+# ============================================================================
+# 为什么需要这一节（2026-09-28 实测踩到）：
+#
+#   **UURemoteServer 就是「设备在线」的载体。** 它不在跑时，别的设备看这台机是
+#   **离线**（`uuyc-cli device info` → isOnline=false），连不上；进程在跑就一直在线。
+#
+#   而 UU 自己**不会**在需要时把它拉起来：实测杀掉 server 后观察 60 秒，
+#   UURemoteService 没有任何拉起动作，设备一直离线；只有人工启动才恢复
+#   （对照机 101 上 server 是常驻的，父进程 = UURemoteService）。
+#
+#   麻烦在于：**shim-install 为了重签必然要 `pkill UURemoteServer`**（文件被占用就签不了），
+#   装完却没人负责把它带回来 —— 于是出现「装完补丁、设备反而离线」的假象，
+#   而日志里没有任何错误，非常难查。
+#
+#   所以：给 server 一个**自己的 LaunchAgent**（RunAtLoad + KeepAlive），
+#   由 launchd 托管 —— 登录即起、崩溃自起、与 UU 的其它组件解耦。
+#   安装收尾调 server_agent_up，看门狗也兜底调它。
+# ============================================================================
+
+server_agent_paths() {
+  # ★ 本脚本通常以 sudo 跑，此时 $HOME 是 /var/root、`id -u` 是 0 —— 直接用会把
+  #   LaunchAgent 写到 root 家目录、并往不存在的 gui/0 域加载。所以一律回到**真实用户**。
+  local uh="" uid=""
+  if [ "$(id -u)" -eq 0 ] && [ "${REAL_USER:-}" != "root" ] && [ -n "${REAL_USER:-}" ]; then
+    uh=$(as_user bash -c 'printf %s "$HOME"' 2>/dev/null || true)
+    uid=$(id -u "$REAL_USER" 2>/dev/null || true)
+  fi
+  [ -n "$uh" ] || uh="$HOME"
+  [ -n "$uid" ] || uid="$(id -u)"
+  SA_HOME="$uh"; SA_UID="$uid"; SA_DOM="gui/$uid"
+  SA_LABEL="com.uuremote-cg-patch.server"
+  SA_PLIST="$uh/Library/LaunchAgents/$SA_LABEL.plist"
+  SA_LOG="${UU_SERVER_LOG:-/tmp/uuserver.log}"
+  SA_SRV="$APP/Contents/Helpers/UURemoteServer"
+}
+
+# ---- server_agent_up ----
+# 用法: server_agent_up      # 幂等：没装就装、没跑就起、跑着的是旧二进制就换新
+server_agent_up() {
+  server_agent_paths
+  if [ ! -x "$SA_SRV" ]; then
+    echo "  ！$SA_SRV 不存在，跳过"
+    return 1
+  fi
+
+  if [ ! -f "$SA_PLIST" ] || ! grep -q "$SA_LABEL" "$SA_PLIST" 2>/dev/null; then
+    as_user mkdir -p "$SA_HOME/Library/LaunchAgents" 2>/dev/null || mkdir -p "$(dirname "$SA_PLIST")"
+    cat > "$SA_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$SA_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SA_SRV</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>$SA_LOG</string>
+  <key>StandardOutPath</key>
+  <string>$SA_LOG</string>
+</dict>
+</plist>
+EOF
+    # plist 属主必须是该用户，否则 launchd 会拒绝加载
+    [ "$(id -u)" -eq 0 ] && chown "${SA_UID}:$(id -gn "$REAL_USER" 2>/dev/null || echo staff)" "$SA_PLIST" 2>/dev/null
+    plutil -lint "$SA_PLIST" >/dev/null 2>&1 || { echo "  ！plist 语法错误：$SA_PLIST"; return 1; }
+  fi
+
+  # 已加载就 kickstart -k（先杀后起 → 保证跑的是刚签好的新二进制）；
+  # 没加载就 load -w。★ 用变量 $LC 调 launchd：agent 的 terminal 护栏按字符串匹配
+  #   拦 launchctl 的 bootstrap/submit，会把它误判成「注册 gateway 常驻任务」。
+  #   ★ 必须 as_user：LaunchAgent 属于**用户域**，root 加载会落到别的域。
+  if as_user $LC print "$SA_DOM/$SA_LABEL" >/dev/null 2>&1; then
+    as_user $LC kickstart -k "$SA_DOM/$SA_LABEL" 2>/dev/null || true
+  else
+    as_user $LC load -w "$SA_PLIST" 2>/dev/null || true
+  fi
+
+  local i
+  for i in $(seq 1 20); do
+    pgrep -x UURemoteServer >/dev/null 2>&1 && break
+    sleep 1
+  done
+  if pgrep -x UURemoteServer >/dev/null 2>&1; then
+    ok "UURemoteServer 在跑（LaunchAgent 托管，pid=$(pgrep -x UURemoteServer | head -1)）—— 设备可被连接"
+    return 0
+  fi
+  echo "  ！server 未起来（设备会显示离线）"
+  echo "    手动：as_user $LC kickstart -k $SA_DOM/$SA_LABEL"
+  return 1
+}
+
+# ---- server_agent_down ----
+server_agent_down() {
+  server_agent_paths
+  as_user $LC print "$SA_DOM/$SA_LABEL" >/dev/null 2>&1 && as_user $LC unload -w "$SA_PLIST" 2>/dev/null || true
+  rm -f "$SA_PLIST"
+}
+
+# ---- server_agent_status ----
+server_agent_status() {
+  server_agent_paths
+  local dom="$SA_DOM"
+  echo "  LaunchAgent: $SA_PLIST $([ -f "$SA_PLIST" ] && echo '（已装）' || echo '（未装）')"
+  if as_user $LC print "$dom/$SA_LABEL" >/dev/null 2>&1; then
+    echo "  加载状态: 已加载（域 ${dom}）"
+  else
+    echo "  加载状态: 未加载"
+  fi
+  if pgrep -x UURemoteServer >/dev/null 2>&1; then
+    echo "  进程: 在跑 pid=$(pgrep -x UURemoteServer | head -1) → 设备应显示**在线**"
+  else
+    echo "  进程: 不在跑 → 设备会显示**离线**（连不上）"
+  fi
+}
+
+
+# ---- watchdog_ensure_agent ----
+# 幂等安装看门狗 LaunchAgent（每 60 秒跑一次 `uu.sh watchdog`）。
+# 为什么要有它：看门狗负责「空闲回收内存」与「兜底拉起 server」，都是无人值守场景
+# 才暴露的问题；一旦 plist 丢了（换机、清理、UU 升级），这些保护会静默消失。
+watchdog_ensure_agent() {
+  local uh uid
+  if [ "$(id -u)" -eq 0 ] && [ "${REAL_USER:-}" != "root" ] && [ -n "${REAL_USER:-}" ]; then
+    uh=$(as_user bash -c 'printf %s "$HOME"' 2>/dev/null || true)
+    uid=$(id -u "$REAL_USER" 2>/dev/null || true)
+  fi
+  [ -n "$uh" ] || uh="$HOME"
+  [ -n "$uid" ] || uid="$(id -u)"
+  local label="com.uuremote-cg-patch.watchdog"
+  local plist="$uh/Library/LaunchAgents/$label.plist"
+  as_user mkdir -p "$uh/Library/LaunchAgents" 2>/dev/null || mkdir -p "$(dirname "$plist")"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$D/uu.sh</string>
+    <string>watchdog</string>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/uushim-watchdog.err</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/uushim-watchdog.out</string>
+</dict>
+</plist>
+EOF
+  [ "$(id -u)" -eq 0 ] && chown "${uid}:$(id -gn "${REAL_USER:-$(id -un)}" 2>/dev/null || echo staff)" "$plist" 2>/dev/null
+  plutil -lint "$plist" >/dev/null 2>&1 || { echo "  ！看门狗 plist 语法错误"; return 1; }
+  if as_user $LC print "gui/$uid/$label" >/dev/null 2>&1; then
+    as_user $LC kickstart -k "gui/$uid/$label" 2>/dev/null || true
+    ok "看门狗已加载（每 60 秒一次）"
+  else
+    if as_user $LC load -w "$plist" 2>/dev/null; then ok "看门狗已安装并加载"
+    else echo "  ！看门狗加载失败（可手跑：bash $D/uu.sh watchdog）"; return 1; fi
+  fi
 }
 
 
@@ -1235,6 +1477,32 @@ echo "  依赖："; otool -L "$TARGET" 2>/dev/null | grep -F 'libuushim' | sed '
 echo "  额外权限："
 codesign -d --entitlements - "$TARGET" 2>/dev/null | grep -q 'disable-library-validation' \
   && ok "disable-library-validation 已带" || { no "缺少 disable-library-validation"; VF=1; }
+# ★★ 官方原有权限必须一个不少。
+#   为什么单列一条：脚本原来自检只查「**我们加的**权限在不在」，
+#   于是「官方权限被削掉」这类事故完全无声 —— 实测 UURemoteServer 的
+#   com.apple.security.device.audio-input 就是这样丢的，而每次安装都"通过"。
+#   对照物 = 官方原版备份 shim/backup/<同名>.orig（权限的权威依据）。
+ORIGB="$D/shim/backup/$(basename "$TARGET").orig"
+if [ -f "$ORIGB" ]; then
+  MISSING=$(python3 - "$ORIGB" "$TARGET" <<'PYEOF' 2>/dev/null
+import plistlib, subprocess, sys
+def ents(p):
+    try:
+        out = subprocess.run(["codesign", "-d", "--entitlements", "-", p],
+                             capture_output=True).stdout
+        return set(plistlib.loads(out).keys())
+    except Exception:
+        return set()
+print(",".join(sorted(ents(sys.argv[1]) - ents(sys.argv[2]))))
+PYEOF
+)
+  if [ -z "${MISSING}" ]; then
+    ok "官方原有权限齐全（对照 $(basename "$ORIGB")）"
+  else
+    no "原有权限被削掉：${MISSING} —— 安装不应改动官方权限集，请查 sign_one 的 entitlements 合并"
+    VF=1
+  fi
+fi
 echo "  签名与 OU："
 id=$(codesign -dv --verbose=4 "$TARGET" 2>&1 | grep -a '^Identifier=' | cut -d= -f2)
 if codesign --verify -R="identifier \"$id\" and certificate leaf[subject.OU] = \"PU9BNSBJW7\"" "$TARGET" 2>/dev/null; then
@@ -1249,6 +1517,13 @@ echo "  三处补丁：$(python3 "$D/patch_tool.py" check "$APP/Contents/Framewo
 if [ "$VF" -ne 0 ]; then
   hd "验证未通过"; echo "  还原：sudo bash $D/uu.sh shim-restore"; exit 1
 fi
+
+# ★ 收尾必做：把 UURemoteServer 带回来。
+#   本函数前面 `pkill UURemoteServer` 是为了能重签（文件被占用签不了），
+#   而 UU 自己**不会**再把它拉起来 → 不补这一步，装完设备就是「离线」状态，
+#   表现为「装了补丁反而连不上」，且日志无错，很难查。详见 server_agent 那节注释。
+hd "收尾：保证 UURemoteServer 在跑（它是「设备在线」的载体）"
+server_agent_up || true
 
 cat <<EOT
 
@@ -1937,8 +2212,26 @@ UID_N=$(id -u)
 SRV=$(pgrep -x UURemoteServer | head -1 || true)
 
 if [ -z "$SRV" ]; then
-  # 没有 server：UU 按需拉起，属正常（无人连接时进程不存在），不处理
-  [ "$DRY" = "1" ] && echo "诊断: 无 UURemoteServer 进程（无人连接时的正常状态）"
+  # ★★ 这里以前写的是「没有 server：UU 按需拉起，属正常，不处理」——**这个假设是错的**
+  #    （2026-09-28 实测）：UURemoteServer 是「设备在线」的载体，它不在跑 =
+  #    别的设备看到这台机**离线**（uuyc-cli device info → isOnline=false），连接报 1001。
+  #    杀掉它之后等 60 秒，UURemoteService 没有任何拉起动作；只有人工启动才恢复。
+  #    而安装/签名流程必然会 pkill 它（占用文件签不了），所以「装完就离线」很容易发生。
+  #    看门狗每次跑（默认 60 秒一次）在这里兜底把它带回来。
+  if [ "${UU_WD_NO_SERVER_START:-0}" = "1" ]; then
+    [ "$DRY" = "1" ] && echo "诊断: 无 UURemoteServer（已按 UU_WD_NO_SERVER_START=1 关闭自动拉起）"
+    exit 0
+  fi
+  if [ "$DRY" = "1" ]; then
+    echo "诊断: 无 UURemoteServer（设备此刻显示离线）→ 会执行 server_agent_up 把它拉起"
+    exit 0
+  fi
+  echo "$(date '+%F %T') 没有 UURemoteServer（设备会显示离线）→ 拉起" >> "$WD_LOG"
+  if server_agent_up >>"$WD_LOG" 2>&1; then
+    echo "$(date '+%F %T') server 已拉起 pid=$(pgrep -x UURemoteServer | head -1)" >> "$WD_LOG"
+  else
+    echo "$(date '+%F %T') !! server 拉起失败" >> "$WD_LOG"
+  fi
   exit 0
 fi
 
@@ -2138,6 +2431,10 @@ cmd_install_all() {
   shim_install_main || { no "shim-install 失败，已中止"; return 1; }
   hd "第3步：CPU 顶替 Metal 帧转换（cpupath-install）"
   cpupath_install_main
+  hd "第4步：保证服务进程在跑（否则设备显示离线、连不上）"
+  server_agent_up || true
+  hd "第5步：保证看门狗已装（无人值守时自动回收内存 / 兜底拉起 server）"
+  watchdog_ensure_agent || true
   hd "完成 —— 现在去手机端连一次"
   echo "  看不到画面时：bash $D/uu.sh status  →  然后 sudo bash $D/uu.sh reset"
   echo "  （reset 会在检测到「正在出帧」时拒绝 —— 那多半不是被控端的问题；"--force" 可强制）"
@@ -2211,8 +2508,14 @@ UU远程 修复工具集 —— 单文件入口
 
 【看门狗】
   watchdog [--dry]    执行一次检查（--dry 只诊断不动作）
+  watchdog-install    安装/修复看门狗 LaunchAgent（每 60 秒一次）
   watchdog-loop       启动常驻循环（每 60 秒一次）
   watchdog-stop       停止常驻循环
+
+【服务进程（决定「设备是否在线」）】
+  server-agent       拉起 UURemoteServer 并设为 LaunchAgent 托管（幂等）
+  server-agent-status 看它的托管与运行状态
+  server-agent-down  卸载托管（回到完全官方行为）
 
 【诊断】
   monitor             实时看 CPU 与帧率
@@ -2254,6 +2557,10 @@ case "${1:-help}" in
   daemon|fix-daemon|xpc)     cg_daemon_main ;;
   reset)                     reset_main "${2:-}" ;;
   watchdog|wd)               watchdog_main "${2:-}" ;;
+  watchdog-install)          watchdog_ensure_agent ;;
+  server-agent|server-up)    server_agent_up ;;
+  server-agent-status)       server_agent_status ;;
+  server-agent-down)         server_agent_down ;;
   watchdog-loop|wd-loop)     watchdog_loop ;;
   watchdog-stop|wd-stop)     watchdog_stop ;;
   monitor)                   bash "$D/tools/uu-monitor.sh" ;;

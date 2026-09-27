@@ -203,8 +203,36 @@
       "dependencies": [
         "feat-001"
       ],
-      "status": "not-started",
-      "evidence": "线索已定位到具体行号（见 description）。判据可沿用现有日志：`脏矩形=` 计数 + 上行流量 + CPU%。"
+      "status": "done",
+      "evidence": "已实现并装机（v15，`UUSHIM_DIRTY=0` 可退回）：每帧与上一帧 memcmp（1600x900 约 5.7MB，内存带宽级开销），真的没变时 `CGDisplayStreamUpdateGetRects` 如实返回 **0 个矩形**，变化时返回整屏（与旧行为一致）。★ 机制生效有运行时证据：日志新增 `同帧=`/`零矩形=` 计数器且两者始终相等（判定与脏矩形报告一致，证明没脱节），50 秒会话实测 119 次/552 帧 ≈ 跳过编码 21.6%。端到端断言全绿。★ **但收益未证实**：A/B 对照（同日、同场景、各 45s）v15 CPU 均值 90.7~100.3%、上行 782 kbps；v14（恒整屏）CPU 104.6%、上行 704 kbps —— **上行没有下降**，说明 UU 很可能并不按这个回报跳过编码。下一步若要继续：查 UU 是否真的消费 GetRects 的 rectCount（方法：拦截 libstreamer 里读 update 的调用点，看它是否只在 count>0 时才入队），而不是继续在 shim 侧加码。另：surface 轮换（每帧换 buffer）未动 —— UU 另有 `IOSurfaceFrame::CheckIfFrameChange` 按 surface 身份判变化，那可能是更关键的信号。"
+    },
+    {
+      "id": "feat-115",
+      "name": "签名时官方权限被静默抹掉（已修 + 加校验防复发）",
+      "description": "重签 UU 的流程会悄悄删除官方 entitlements。两个独立成因叠加：① `mktemp /tmp/ents.XXXXXX.plist` —— macOS(BSD) 的 mktemp 要求 X 在**结尾**，此处会建出字面名文件，之后每次 `mkstemp failed: File exists` → 命令替换得到空串 → `--entitlements` 整条不传；② entitlements 基准取自「当前签名」，一旦被削过一次，后续每次都以已削版本为基准 → **永久丢失且永不自愈**。两者都无声：签名照样「通过」，脚本自检只查「我们加的权限在不在」，所以连装十几次都发现不了。",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "实测损失：`UURemoteServer` 的 `com.apple.security.device.audio-input`（麦克风）被抹掉，只剩我们加的 `disable-library-validation`（用 `codesign -d --entitlements :-` 与 `shim/backup/UURemoteServer.orig` 对照确认）。修法：① 改用 `as_user mktemp -t <前缀>`（X 在结尾；且以真实用户身份创建 —— root 建的 600 文件随后 `sudo -u <用户> codesign` 读不到）；② 基准改为**并集**「当前签名 ∪ 官方备份 ∪ 额外权限」，任一来源被削都能自动补回。验证：重新安装后权限恢复为 `[disable-library-validation, device.audio-input]`（自愈成功）。防复发：安装流程新增校验——对照 `shim/backup/<同名>.orig` 逐项比对官方权限，缺一项即报红；注入测试双向验证（正常态报「齐全」、伪造被削场景准确检出 `device.audio-input`）。"
+    },
+    {
+      "id": "feat-116",
+      "name": "安装时的钥匙串授权弹窗：无人值守处理（部分完成）",
+      "description": "重签 UU 后签名变化 → 之前授予「访问钥匙串密钥 com.netease.uuremote」的许可失效 → 系统弹框「…想要访问你的钥匙串中的密钥」+ 密码输入框。无人值守（远端/夜里）时会卡在安装中间。",
+      "dependencies": [
+        "feat-115"
+      ],
+      "status": "in-progress",
+      "evidence": "已做：① 口令放本地私有文件 `.local/keychain-pw`（600 权限、`.gitignore` 覆盖、**绝不入 git**），`uu.sh` 新增 `preunlock_login_keychain` 在签名前解锁登录钥匙串；② 弹窗可用 AppleScript（System Events / AX 通道）读取与应答 —— 实测成功读出「想要访问钥匙串中的密钥」并点击「始终允许」，UU 四进程随即恢复正常 XPC 通信。★ **关键认识（必须记住）**：**解锁钥匙串 ≠ 授予 ACL 授权**。钥匙串解锁只让钥匙串本身可用，而弹窗问的是「这个 app 能不能读这把密钥」——所以只做预解锁**不足以**消除该弹窗，每次重签后仍会弹一次。★ 真正免弹窗的候选方案（未做，需评估安全含义）：对该密钥设置 partition list（`security set-generic-password-partition-list -S apple-tool:,apple:,codesign: -s com.netease.uuremote -a <acct> -k <登录密码>`），或把该密钥 ACL 放宽；两种都不理想 —— 它会放宽「哪些进程能读该密钥」的范围，属于安全降级，应与用户确认后再做。★ 另注：本机 `screencapture` / cua-driver 全屏截图被系统 SIGKILL(137)（注入变量为空，非污染）→ GUI 操作只能走 AX 通道（`osascript` + System Events），这也是本次能处理弹窗的原因。★ 弹窗处理脚本放在 /tmp（用后即弃）；口令本身只在本地文件与脚本内部流转，不打印、不入库。"
+    },
+    {
+      "id": "feat-117",
+      "name": "设备显示「离线」连不上：UURemoteServer 没人拉起（已修 + 加托管与兜底）",
+      "description": "症状：别的设备看这台机是「离线」，连接直接报 1010「设备当前离线」。根因不在补丁、不在权限、不在网络 —— 而是 **UURemoteServer 没在跑**，它就是「设备在线」的载体（UURemoteService/Daemon 都正常也没用，它们不负责上报在线）。而安装/签名流程必然会 `pkill` 它（文件被占用就签不了），装完却没人把它带回来，于是表现为「装了补丁反而连不上」，日志里没有任何错误。",
+      "dependencies": [
+        "feat-115"
+      ],
+      "status": "done",
+      "evidence": "★ 逐条排除（都是这次实测做的）：控制端能看到别的 3 台设备、本机能从自己的视角看到 101 的笔记本在线 → 两侧与 UU 服务器通信都正常；TCC 里辅助功能/屏幕录制授权都在；UU 进程与网络连接都正常；101 上 server 常驻（父进程=UURemoteService），macmini 上从 01:48 起就没有。★ 决定性实验：杀掉 server 后观察 **60 秒**，UURemoteService **不会**把它拉起来，设备一直离线；手动启动 server（`Contents/Helpers/UURemoteServer`）后**设备立刻回到在线**（isOnline=true）且端到端出帧正常。修法：① 新增 `com.uuremote-cg-patch.server` LaunchAgent（RunAtLoad + KeepAlive）托管 server —— 登录即起、被杀自起、与 UU 其它组件解耦；② `sign_main` 与 `shim_install_main` 收尾都调 `server_agent_up`（它们前面都 pkill 过 server）；③ 看门狗原来写着「没有 server：UU 按需拉起，属正常」——**该假设已被实测推翻**，改为兜底把 server 拉起来；④ 新增命令 `server-agent` / `server-agent-status` / `server-agent-down`、`watchdog-install`。★ 验证：KeepAlive 生效（杀掉后 launchd 2 秒内自动重启，ppid=1）；看门狗从零恢复（先卸载托管+杀掉 → 看门狗一次调用即重建 plist 并拉起，设备回到在线）；安装收尾路径走通；端到端 test.sh 全 PASS。★ 附带的测试口径修正（防假红）：test.sh 里「回调待回必须 =0」过严 —— 采样瞬间可能正有回调在飞（实测 待回=1，而同一会话 stop 行写「回调进206/出206 待回0 排空=是」）；改为「≤2 视为在飞」+「若窗口内有 stop 行则其排空结论必须是『是』」，两种故障态（持续积压、排空=否）都注入验过能报红。另加「先等设备上线再观测」（UU_TEST_ONLINE_WAIT，默认 90s），避免 server 刚重启的上报延迟窗口被误判成补丁故障。"
     }
   ]
 }

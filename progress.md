@@ -258,6 +258,31 @@ bash uu.sh watchdog --dry
     不能进 git 历史的原因：里面含**设备 ID、用户名、VPN 内网 IP**（扫描出 190+ 处）。
   · 文档 8 处引用已同步为「git 历史取回」或「已清除，仅存结论」。
 
+### 2026-09-28 · 装完反而连不上：UURemoteServer 没人拉起（feat-117）
+
+- **症状**：别的设备看这台机「离线」，连接报 1010「设备当前离线」。
+- **根因**：`UURemoteServer` 不在跑 —— 它才是「设备在线」的载体
+  （`UURemoteService`/`Daemon` 正常也没用，它们不负责上报在线）。
+  安装/签名流程**必然要 pkill 它**（占用文件签不了），而 **UU 自己不会补起**
+  （实测杀后等 60s 无动作）→ 表现为「装了补丁反而连不上」，日志还完全无错。
+- **修法**：给 server 一个自己的 LaunchAgent（`com.uuremote-cg-patch.server`，
+  RunAtLoad + KeepAlive）；`sign_main` / `shim_install_main` 收尾都拉起它；
+  看门狗那句「没有 server 属正常，UU 按需拉起」是**错的假设**，改成兜底拉起。
+- **新命令**：`server-agent`（拉起+托管）、`server-agent-status`、`server-agent-down`、`watchdog-install`。
+- **验证**：KeepAlive 杀掉 2 秒内自起（ppid=1）；看门狗从零恢复成功；端到端全 PASS。
+- **同时修掉两处测试假红**：「回调待回必须 =0」过严（采样瞬间可能在飞，实测待回=1 而
+  同会话 stop 行是「进206/出206 排空=是」）；以及 server 刚重启的上报延迟窗口
+  被误判成补丁故障（加「先等设备上线」）。
+
+### 2026-09-28 · 签名悄悄削掉官方权限（feat-115）
+
+- `mktemp /tmp/ents.XXXXXX.plist` —— BSD 的 mktemp 要求 X 在**结尾**，
+  于是建出字面名文件、之后每次 `mkstemp failed: File exists` → 命令替换得空串
+  → `--entitlements` 整条不传 → **官方 `device.audio-input`（麦克风）被抹掉**。
+- 更隐蔽的是基准问题：entitlements 取自「当前签名」，一旦被削过就**永久丢失、永不自愈**。
+- 修法：改用 `as_user mktemp -t <前缀>`；基准取「当前 ∪ 官方备份 ∪ 额外权限」**并集**。
+- 防复发：安装后对照 `shim/backup/<同名>.orig` 逐项比对官方权限，缺一项报红；注入验过。
+
 ### 2026-09-26 · 脚本整合 + 放 GitHub
 
 - 9 个脚本逐字并入 `uu.sh`（19 子命令），旧脚本归档到 `archive/pre-merge-20260926/`（回退点）。

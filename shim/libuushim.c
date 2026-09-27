@@ -11,6 +11,8 @@
 //
 // v2 相对 v1 修的三个「有帧但无画面」根因：
 //   1. 脏矩形返回 0x0 → UU 认为「画面没变化」→ 不推流。现返回整屏矩形。
+//      ★ v15 起改成「如实报告」：真的没变才报 0 个矩形（详见 g_changed 处注释）。
+//        当时一律返回 0x0 是因为**没有**变化检测能力，只能恒报「没变」→ 恒不推流。
 //   2. 无条件写 BGRA，但 UU 请求的可能是 '420v'/'420f'（NV12，喂编码器的标准格式）
 //      → 编码器拿到错格式 → 黑帧。现按请求格式做 BGRA→NV12 转换。
 //   3. 回调在自己的线程，而真实 API 在调用者指定的 dispatch queue 上回调
@@ -111,7 +113,7 @@ static void ulog(const char *fmt, ...) {
 }
 
 __attribute__((constructor)) static void uushim_init(void) {
-    ulog("=== libuushim v14 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
+    ulog("=== libuushim v15 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,10 @@ typedef struct {
     //   create 只能返回「无采集线程的假句柄」→ 黑屏/连不上，且进程 RSS 涨到 1.7GB。
     volatile int dead;          // 1 = 该会话已废（失败），槽位应立刻让出
     double created_ms;          // 创建时刻（判定陈旧死槽位用）
+    // ★★★ v15：上一帧的 BGRA 快照。用途见 g_changed 处的长注释：
+    //   与当前帧 memcmp 就能如实回答「这一帧到底变没变」，从而让 UU 在画面静止时
+    //   不编码、不推流（macOS 自带屏幕共享省 CPU 的核心机制就是这个）。
+    uint8_t *prev;
 } Shim;
 
 #define MAXS 32
@@ -160,6 +166,31 @@ static CFTypeRef g_handle[MAXS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_frames;
 static volatile int g_rects;   // UU 查询脏矩形的次数：证明它真的在消费我们的帧
+// ★★★ v15：如实报告「画面有没有变化」（对标 VNC：静止就不推流，这是省 CPU 的正路）
+//
+// 背景（为什么原先不做）：v2 为了让画面**先出来**，把两个「变没变」的信号都中立化了：
+//   ① GetRects 恒返回整屏（原来的 0x0 让 UU 认为没变化 → 完全不推流 → 黑屏）
+//   ② 每帧轮换 3 个 surface（UU 的 IOSurfaceFrame::CheckIfFrameChange 按 surface 身份判变化）
+// 代价是 UU 认为「每帧都是新的、且整屏都变了」→ 画面**完全静止也逐帧软编**。
+//
+// 现在这么做：每帧与上一帧 memcmp（1600x900 约 5.7MB，内存带宽级开销，实测 ~1ms）。
+//   · 有变化 → 报告整屏（与今天行为一致，零额外风险）
+//   · 无变化 → 如实报告 0 个矩形，让 UU 自己跳过这一帧
+// 关键差别：这不是「恒返回 0x0」（那会彻底不推流），而是**只在真的没变时才这么报**。
+//
+// 回退开关：环境变量 UUSHIM_DIRTY=0 → 退回旧行为（恒整屏）。
+//   出问题的症状是「画面不动」或「卡住」→ 设 0 并重装 shim 即可复原。
+static volatile int g_changed = 1;   // 最近一帧是否与上一帧不同（1=是，首帧也算）
+static volatile int g_same;          // 累计「判定为没变化」的帧数（取证用）
+static volatile int g_zero_rects;    // 累计「如实报告 0 个矩形」的次数（取证用）
+static int uushim_dirty_mode(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("UUSHIM_DIRTY");
+        cached = (!e || !*e) ? 1 : (atoi(e) != 0);
+    }
+    return cached;
+}
 static volatile int g_hb;      // 交给 UU 的回调块「开始执行」次数
 static volatile int g_ha;      // 交给 UU 的回调块「执行完毕」次数（hb-ha 持续变大 = UU 卡在回调里）
 static size_t g_last_w, g_last_h;   // 最近一条流的尺寸（供 GetRects 返回整屏矩形）
@@ -271,6 +302,21 @@ static void *worker(void *arg) {
                 CGImageRelease(img);
             }
         }
+        // ★★★ v15：如实判定「这一帧到底变没变」（机制与回退开关见 g_changed 处注释）。
+        //   位置很关键：必须在把这一帧交给 UU **之前**定好，UU 随后查脏矩形时才拿得到正确结论。
+        {
+            int changed = 1;
+            if (uushim_dirty_mode() && s->prev && s->buf) {
+                size_t nb = s->w * 4 * s->h;
+                if (memcmp(s->buf, s->prev, nb) == 0) {
+                    changed = 0;                      // 静止：连 memcpy 都省掉
+                } else {
+                    memcpy(s->prev, s->buf, nb);      // 有变化：更新基线
+                }
+            }
+            g_changed = changed;
+            if (!changed) __sync_fetch_and_add(&g_same, 1);
+        }
         // 按请求格式写入「当前环形缓冲」，然后轮转到下一个（模仿真实三缓冲）
         int bi = s->cur;
         s->cur = (s->cur + 1) % (s->nbuf > 0 ? s->nbuf : 1);
@@ -347,8 +393,9 @@ static void *worker(void *arg) {
             if (!s->logged || local % 24 == 0) {
                 s->logged = 1;
                 int pend = g_hb - g_ha;
-                ulog("出帧 #%d/%d  fmt=%.4s %zux%zu 亮度=%.1f 脏矩形=%d 回调进%d/出%d 待回%d 延迟%.0fms(峰%.0f) 状态[%d,%d,%d,%d]",
+                ulog("出帧 #%d/%d  fmt=%.4s %zux%zu 亮度=%.1f 脏矩形=%d 同帧=%d 零矩形=%d 回调进%d/出%d 待回%d 延迟%.0fms(峰%.0f) 状态[%d,%d,%d,%d]",
                      local, g_frames, fourcc(s->fmt), s->w, s->h, last_lum, g_rects,
+                     g_same, g_zero_rects,
                      g_hb, g_ha, pend, (double)g_lat_last_ms, (double)g_lat_max_ms,
                      g_st[0], g_st[1], g_st[2], g_st[3]);
             }
@@ -527,6 +574,7 @@ static void release_frames(Shim *s) {
         if (s->surf[i]) { CFRelease(s->surf[i]);          s->surf[i] = NULL; }
     }
     if (s->buf) { free(s->buf); s->buf = NULL; }
+    if (s->prev) { free(s->prev); s->prev = NULL; }   // ★ v15 变化检测缓冲
     if (s->ctx) { CGContextRelease(s->ctx); s->ctx = NULL; }
 }
 
@@ -619,6 +667,11 @@ static int alloc_buffers(Shim *s) {
                                    kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(cs);
     if (!s->buf || !s->ctx) { ulog("!! 渲染缓冲分配失败（%zux%zu）", w, h); release_frames(s); return -1; }
+    // ★ v15：上一帧快照（变化检测用）。分配失败不致命 —— 只是退回「恒整屏」的旧行为。
+    if (uushim_dirty_mode() && !s->prev) {
+        s->prev = calloc(1, w * 4 * h);
+        if (!s->prev) ulog("!! 变化检测缓冲分配失败 → 本会话退回「恒整屏」行为（不影响出画面）");
+    }
 
     s->released = 0;
     return 0;
@@ -741,9 +794,24 @@ static const CGRect *my_update_get_rects(void *upd, int type, size_t *count) {
     (void)upd; (void)type;
     __sync_fetch_and_add(&g_rects, 1);
     static CGRect r[1];
-    if (g_last_w > 0 && g_last_h > 0) r[0] = CGRectMake(0, 0, (CGFloat)g_last_w, (CGFloat)g_last_h);
-    else                              r[0] = CGRectMake(0, 0, 1, 1);
-    if (count) *count = 1;
+    // ★★★ v15：如实回答「哪里变了」。
+    //   没变化 → 报 0 个矩形，UU 自己就不编码这一帧（省 CPU 的正路，同 VNC）。
+    //   有变化 → 报整屏（与旧行为一致）。
+    //   ⚠ 与「恒返回 0x0」的区别：那只在**真的没变**时才这么报，画面一动就会恢复推流。
+    int full = 1;
+    if (uushim_dirty_mode() && !g_changed) {
+        full = 0;
+        __sync_fetch_and_add(&g_zero_rects, 1);
+    }
+    if (full) {
+        if (g_last_w > 0 && g_last_h > 0) r[0] = CGRectMake(0, 0, (CGFloat)g_last_w, (CGFloat)g_last_h);
+        else                              r[0] = CGRectMake(0, 0, 1, 1);
+        if (count) *count = 1;
+    } else {
+        // 仍返回一个合法数组（万一调用方不看 count 也不会读到野指针），但如实报 0 个
+        r[0] = CGRectMake(0, 0, 0, 0);
+        if (count) *count = 0;
+    }
     return r;
 }
 

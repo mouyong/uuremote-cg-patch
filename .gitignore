@@ -57,3 +57,6 @@ shim/rehearsal-*.log
 # AppleDouble 垃圾（内容是元数据，Linux 容器读不了）
 .DS_Store
 ._*
+
+# 本地私有（含安装时用的钥匙串口令；绝不入版本库）
+.local/

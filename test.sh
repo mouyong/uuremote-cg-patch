@@ -176,9 +176,49 @@ pass "SSH 到 ${HOST} 可达"
 # ---------- ④ 端到端 ----------
 echo
 echo "--- 端到端（观测 ${SECS} 秒）---"
+
+# ★ 先确认设备**在线**再开始观测。
+#   为什么必须加：设备在线与否由 UURemoteServer 上报，而 server 刚被（重新）拉起、
+#   或刚结束一场会话时，重新上报在线状态有**若干秒到十几秒的延迟**；这期间连接会
+#   直接报 1010「设备当前离线」。实测踩过：测试恰好落在这个窗口里 → 报「连接失败 +
+#   零出帧」，看着像补丁坏了，其实只是等一等的事（假红会把人骗去查错方向）。
+#   所以：不在线就先等，等到上线再观测；等不到才真报红（那才是真故障）。
+ONLINE_WAIT="${UU_TEST_ONLINE_WAIT:-90}"
+device_online() {
+  $SSH "$HOST" "$CLI device info ${DEV}" 2>/dev/null \
+    | python3 -c "import sys,json
+try: print(json.load(sys.stdin)['data']['matchedItem'].get('isOnline'))
+except Exception: print('')" 2>/dev/null
+}
+if [ "$LOCAL_ONLY" = "0" ]; then
+  ISON="$(device_online || true)"
+  if [ "$ISON" != "True" ]; then
+    echo "  设备当前不在线（isOnline=${ISON:-?}）→ 等它上报（最多 ${ONLINE_WAIT}s）"
+    W=0
+    while [ "$W" -lt "$ONLINE_WAIT" ]; do
+      sleep 5; W=$((W + 5))
+      ISON="$(device_online || true)"
+      echo "    +${W}s  isOnline=${ISON:-?}"
+      [ "$ISON" = "True" ] && break
+    done
+  fi
+  if [ "$ISON" != "True" ]; then
+    bad "设备始终未上线（等满 ${ONLINE_WAIT}s）→ 被控端不在线，连不上。先查：pgrep -x UURemoteServer"
+    echo
+    echo "结果: FAIL ✘ —— 设备离线（不是补丁问题；先让 server 跑起来）"
+    exit 1
+  fi
+  pass "设备在线（isOnline=True）"
+fi
+
+# ★★ 判据用「本窗口内新产生的帧行数」，**不用**日志里的累计帧号。
+#   为什么：累计帧号是 server 进程内的计数器，测试期间若 server 重启（装完 shim 就跑测试、
+#   看门狗回收内存、失败会话让出槽位）它会从 1 重新数 —— 于是「9249 → 576」被误判成
+#   「帧号回退」，而那其实是**测试口径**的问题，不是故障。实测踩过。
 F0="$(last_frames || true)"
 [ -z "${F0}" ] && F0=0
-echo "  基线累计帧号: ${F0}"
+C0="$(grep -ac '出帧 #' "$SHIM_LOG" 2>/dev/null || echo 0)"
+echo "  基线累计帧号: ${F0}（仅参照）；窗口判据基线: 日志内 ${C0} 条出帧行"
 
 # 连接（后台起，随后轮询）
 $SSH "$HOST" "$CLI device connect ${DEV}" >/tmp/uu_test_connect.out 2>&1 &
@@ -188,10 +228,13 @@ ELAPSED=0
 while [ "$ELAPSED" -lt "$SECS" ]; do
   sleep 5
   ELAPSED=$((ELAPSED + 5))
-  echo "  +${ELAPSED}s  帧号=$(last_frames || echo '?')  亮度=$(last_lum || echo '?')"
+  NEW=$(( $(grep -ac '出帧 #' "$SHIM_LOG" 2>/dev/null || echo 0) - C0 ))
+  echo "  +${ELAPSED}s  帧号=$(last_frames || echo '?')  窗口内新增=${NEW}  亮度=$(last_lum || echo '?')"
 done
 
 F1="$(last_frames || true)"
+C1="$(grep -ac '出帧 #' "$SHIM_LOG" 2>/dev/null || echo 0)"
+PRODUCED=$((C1 - C0))
 LUM="$(last_lum || true)"
 PEND="$(last_pend || true)"
 [ -z "${F1}" ] && F1=0
@@ -206,16 +249,20 @@ if grep -q '"success" *: *true' /tmp/uu_test_connect.out 2>/dev/null \
    || grep -q '已连接\|connected' /tmp/uu_test_connect.out 2>/dev/null; then
   pass "连接指令被接受"
 else
-  bad "连接指令失败（见 /tmp/uu_test_connect.out）"
+  # ★ 失败信息要指出**往哪查**：1010「设备当前离线」不是补丁问题，是 server 没跑/刚重启，
+  #   两者处置完全不同（一个查 server，一个查采集器/编码器）。别让人从头猜。
+  if grep -q '1010\|当前离线' /tmp/uu_test_connect.out 2>/dev/null; then
+    bad "连接被拒：设备自报**离线**（错误 1010）→ 查被控端 server：pgrep -x UURemoteServer（应非空）"
+  else
+    bad "连接指令失败（见 /tmp/uu_test_connect.out）"
+  fi
 fi
 
-# 帧数是否增长
-if [ "${F1}" -gt "${F0}" ] 2>/dev/null; then
-  pass "出帧增长：${F0} → ${F1}（+$((F1 - F0))）"
-elif [ "${F1}" -lt "${F0}" ] 2>/dev/null; then
-  bad "帧号回退（${F0} → ${F1}）：测试期间 server 被重启过（看门狗？）—— 排除干扰后重测"
+# 帧数是否增长（判据见上：用窗口内新增行数，跨 server 重启依然成立）
+if [ "${PRODUCED}" -gt 0 ] 2>/dev/null; then
+  pass "窗口内出帧增长：+${PRODUCED} 帧（累计帧号 ${F0} → ${F1}；重启会归零，不影响本判据）"
 else
-  bad "测试期间零出帧（帧号停在 ${F1}）"
+  bad "窗口内零出帧（累计帧号停在 ${F1}）"
 fi
 
 # 亮度（黑帧最隐蔽，必须断言）
@@ -226,10 +273,51 @@ else
 fi
 
 # 回调待回
-if [ -n "${PEND}" ] && [ "${PEND}" = "0" ]; then
-  pass "回调无积压（待回 0）"
+# ★ 判据不能写「必须等于 0」：日志是一行一行刷的，采样那一瞬间**可能正有一个回调在执行**
+#   （实测踩过：采样到「回调进192/出191 待回1」，同一会话的 stop 行却是
+#   「回调进206/出206 待回0，回调排空=是」）—— 那条是**假红**，会让人去查一个不存在的毛病。
+#   真故障长什么样：待回**持续增大**（回调卡住不再返回），或会话结束时报「回调排空=否」。
+#   所以这里改成两条：① 在飞回调 ≤ 2（余量）；② 若窗口内出现 stop 行，其排空结论必须是「是」。
+PEND_OK=1
+if [ -n "${PEND}" ] && [ "${PEND}" -le 2 ] 2>/dev/null; then
+  pass "回调无积压（待回 ${PEND}；≤2 视为在飞回调）"
 else
+  PEND_OK=0
   bad "回调积压（待回 ${PEND:-?}）→ 上层可能卡在回调里"
+fi
+DRAIN_LINE="$(grep -a '回调排空=' "$SHIM_LOG" 2>/dev/null | tail -1)"
+if [ -n "$DRAIN_LINE" ]; then
+  case "$DRAIN_LINE" in
+    *回调排空=是*) pass "会话结束回调已排空（$(printf '%s' "$DRAIN_LINE" | sed -n 's/.*\(回调进[0-9]*\/出[0-9]*\).*/\1/p')）";;
+    *) PEND_OK=0; bad "会话结束回调**未**排空 → 上层真的卡住了：$(printf '%s' "$DRAIN_LINE" | cut -c1-100)";;
+  esac
+fi
+[ "$PEND_OK" = "1" ] || true   # 结果由 bad() 统一置 fail=1，这里无需额外记账
+
+# ---------- ⑤ v15 变化检测是否在位（feat-114 的验收）----------
+# 判据看**日志里的计数器**（唯一能证明「跑的是本仓库这版」的运行时证据）。
+# 装的是旧版 shim → 日志里根本没有 `同帧=` 字段 → 这里必须报红，
+# 否则「装了旧版却以为优化生效」这种假绿没人能发现。
+echo
+echo "--- v15 变化检测（feat-114）---"
+GATE="$(grep -a '出帧 #' "$SHIM_LOG" 2>/dev/null | grep -a '同帧=' | tail -1)"
+if [ -z "${GATE}" ]; then
+  bad "已装 shim 无 v15 计数器（日志无 \`同帧=\`）—— 装的不是本仓库版本？重跑：sudo bash uu.sh shim-install"
+else
+  SAME_N="$(printf '%s' "$GATE" | sed -n 's/.*同帧=\([0-9]*\).*/\1/p')"
+  ZERO_N="$(printf '%s' "$GATE" | sed -n 's/.*零矩形=\([0-9]*\).*/\1/p')"
+  CUR_N="$(printf '%s' "$GATE" | sed -n 's/.*出帧 #[0-9]*\/\([0-9]*\).*/\1/p')"
+  if [ "${SAME_N:-0}" -gt 0 ] 2>/dev/null && [ "${ZERO_N:-0}" -gt 0 ] 2>/dev/null; then
+    PCT=$(awk "BEGIN{printf \"%.1f\", ${SAME_N}*100/${CUR_N}}")
+    pass "静止帧被如实报告：判定没变化 ${SAME_N} 次 / 累计 ${CUR_N} 帧（跳过编码约 ${PCT}%），如实报 0 矩形 ${ZERO_N} 次"
+  else
+    skip "本轮未观测到「没变化」的帧（画面一直在变）—— 机制在位但这次没机会省；计数器：同帧=${SAME_N:-0} 零矩形=${ZERO_N:-0}"
+  fi
+  # 反向核对：零矩形 必须与 同帧 一致（判定没变化就应当如实报 0 个矩形）。
+  #   不一致说明 GetRects 与帧判定脱节 —— 那正是「机制在白跑」的症状。
+  if [ "${SAME_N:-0}" != "${ZERO_N:-0}" ]; then
+    bad "计数器不一致（同帧=${SAME_N} 零矩形=${ZERO_N}）：判定与脏矩形报告脱节，机制没真正生效"
+  fi
 fi
 
 # 本次窗口内的异常行

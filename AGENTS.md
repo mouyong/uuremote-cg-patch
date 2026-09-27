@@ -60,6 +60,23 @@ Before writing code:
 11. **本机无 Metal、无硬编码器**（VT 只有 `Apple H.264 (SW)`）—— 不要试图走 Metal / 硬编路径；
     H.264 软编占约 150% CPU，是帧率的唯一瓶颈。
 12. **中文全角字符紧跟变量会污染变量名** → 一律写 `${VAR}（`（实测 `$x）` 输出乱码、`set -u` 下直接中止）。**现已由 `init.sh` 自动检查**（因为这条被连续违反过两次），不必只靠记性。
+13. **签名后必须核对「官方原有权限」是否完整**，不能只查「我们加的权限在不在」。
+    两个实测坑（都无声、且都不会让签名报错）：
+    - `mktemp` 模板的 X 必须在**结尾**：`mktemp /tmp/x.XXXXXX.plist` 会建出字面名文件，
+      之后永远 `mkstemp failed: File exists` → 命令替换拿到空串 → `--entitlements` 不传 →
+      **官方权限被悄悄抹掉**（实测丢过 `device.audio-input`）。
+    - entitlements 基准**不能只看当前签名**：一旦被削过一次，后续每次都以已削版本为基准 →
+      **永久丢失、永不自愈**。基准要取「当前 ∪ 官方备份 ∪ 我们的额外权限」的并集。
+    已加机器校验：`uu.sh` 安装后对照 `shim/backup/<同名>.orig` 逐项比对，缺一项即报红。
+14. **`UURemoteServer` 是「设备在线」的载体 —— 它不在跑，别的设备看到的是离线。**
+    症状是 `uuyc-cli device info` → `isOnline: false`、连接报 1001；`UURemoteService`/`Daemon`
+    都正常在跑也没用（它们不负责上报在线）。
+    - **UU 不会自己把它拉起来**：实测杀掉后等 60 秒无任何拉起动作，只有人工启动才恢复。
+    - 而**安装与签名流程必然要 `pkill` 它**（文件被占用就签不了）→ 不补回来就是
+      「装了补丁反而连不上」，且日志无错、极难查。
+    - 所以：给它一个**自己的 LaunchAgent**（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive），
+      由 launchd 托管；安装/签名的收尾、以及看门狗都要调 `server_agent_up`。
+    - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
 
 ## Working Rules（工作规则）
 
