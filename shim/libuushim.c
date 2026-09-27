@@ -113,7 +113,7 @@ static void ulog(const char *fmt, ...) {
 }
 
 __attribute__((constructor)) static void uushim_init(void) {
-    ulog("=== libuushim v15 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
+    ulog("=== libuushim v16 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】+ **v16 修两处真泄漏：让出槽位/超时回收时只摘映射不释放缓冲（每处漏 ~28MB 显存，256MB 显存泄漏约 9 次即耗尽 → 新连接拿不到缓冲 → 黑屏），并加缓冲记账供机器核对**；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,9 +158,31 @@ typedef struct {
     //   与当前帧 memcmp 就能如实回答「这一帧到底变没变」，从而让 UU 在画面静止时
     //   不编码、不推流（macOS 自带屏幕共享省 CPU 的核心机制就是这个）。
     uint8_t *prev;
+    // ★ v16：缓冲记账标志。alloc_buffers/release_frames 各自只加减一次，
+    //   用来让「泄漏有没有真的消失」可被机器核对（看日志里活跃缓冲数是否随连接次数增长）。
+    volatile int had_bufs;
 } Shim;
 
 #define MAXS 32
+
+// ★ v16：缓冲记账。为什么需要：这次「连上没画面」的两条真根因（slot_detach 与
+//   超时回收只摘映射不释放缓冲）**都是人眼看不出来的**——日志正常出帧、设备在线、
+//   权限齐全，只有显存悄悄被吃掉。所以修完必须留下**能被机器核对**的数：
+//   静止/正常使用时活跃缓冲会话数应长期 ≤ 2，**不随连接次数单调增长**。
+static volatile long g_live_buf_sessions = 0;
+static volatile long g_live_buf_bytes = 0;
+
+// 估算某会话持有多少缓冲（MB）。BGRA 三缓冲 + 渲染缓冲 + 上一帧快照为上界估值；
+// NV12 实际更小，所以这个数只会偏大，用于「有没有泄漏」的判据足够。
+static double shim_mb(const Shim *s) {
+    if (!s || !s->w || !s->h) return 0;
+    double per = (double)s->w * (double)s->h * 4.0;
+    return per * (NBUF + 2) / (1024.0 * 1024.0);
+}
+static void bufs_account(const char *why) {
+    ulog("缓冲记账[%s]：活跃 %ld 会话 / 约 %.1f MB（不随连接次数增长才正常）",
+         why, g_live_buf_sessions, (double)g_live_buf_bytes / (1024.0 * 1024.0));
+}
 static Shim *g_shim[MAXS];
 static CFTypeRef g_handle[MAXS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -471,10 +493,19 @@ static CGDisplayStreamRef shim_create(CGDirectDisplayID d, size_t w, size_t h, O
                 nowm - c->created_ms > 60000) {
                 g_handle[i] = NULL; g_shim[i] = NULL;
                 c->idx = -1; c->dead = 1;
+                // ★★★ v16 关键修复：这里以前只摘映射、**不释放缓冲**，每个被回收的
+                //   会话永久泄漏 3 个 IOSurface + 渲染缓冲（1600x900 约 28MB）。本机显存
+                //   只有 256MB → 泄漏约 9 次即耗尽 → CVPixelBufferCreate 报 -6662 →
+                //   新会话拿不到缓冲 → 连上黑屏。实测日志里 216 次分配失败就是这么攒出来的。
+                //   started==0 保证没有 worker 线程在用这些缓冲，释放安全。
+                release_frames(c);
                 reaped++;
             }
         }
-        if (reaped) ulog("槽位回收：清掉 %d 个超过 60 秒未启动的死会话", reaped);
+        if (reaped) {
+            ulog("槽位回收：清掉 %d 个超过 60 秒未启动的死会话（v16 已连缓冲一起释放）", reaped);
+            bufs_account("回收后");
+        }
     }
     int idx = -1;
     for (int i = 0; i < MAXS; i++) if (!g_handle[i]) { idx = i; break; }
@@ -569,6 +600,9 @@ static CGDisplayStreamRef my_create_dq(CGDirectDisplayID d, size_t w, size_t h, 
 //   现在：stop 时释放缓冲并交还槽位；start 时若缓冲已释放则按需重建（懒分配）。
 // ---------------------------------------------------------------------------
 static void release_frames(Shim *s) {
+    // ★ v16：与实际释放对称记账。先记录本次是否真的持有缓冲，
+    //   没有的话不减（否则计数会被重复调用带成负数，反而失去判据力）。
+    int had = (s->surf[0] || s->pb[0] || s->buf || s->prev) ? 1 : 0;
     for (int i = 0; i < NBUF; i++) {
         if (s->pb[i])   { CVPixelBufferRelease(s->pb[i]); s->pb[i] = NULL; }
         if (s->surf[i]) { CFRelease(s->surf[i]);          s->surf[i] = NULL; }
@@ -576,6 +610,11 @@ static void release_frames(Shim *s) {
     if (s->buf) { free(s->buf); s->buf = NULL; }
     if (s->prev) { free(s->prev); s->prev = NULL; }   // ★ v15 变化检测缓冲
     if (s->ctx) { CGContextRelease(s->ctx); s->ctx = NULL; }
+    if (had && s->had_bufs) {
+        s->had_bufs = 0;
+        __sync_fetch_and_sub(&g_live_buf_sessions, 1);
+        __sync_fetch_and_sub(&g_live_buf_bytes, (long)(shim_mb(s) * 1024.0 * 1024.0));
+    }
 }
 
 // ★★★ v14：把会话从槽位表摘除（让出槽位号）。
@@ -584,8 +623,13 @@ static void release_frames(Shim *s) {
 //   实测泄漏 15 个槽位、进程 RSS 涨到 1.7GB 后 create 只能返回假句柄 → 黑屏。
 //   ⚠ 刻意**不 free(s) 也不 CFRelease(handle)**：UU 可能仍持有该句柄并在之后调用
 //   stop/getRunLoopSource，释放会造成 use-after-free。摘除后 lookup() 自然返回 NULL，
-//   那些调用会走「未知句柄」的安全分支；代价只是每死一个会话泄漏 ~200 字节结构体，
-//   远小于原来泄漏 3 个 IOSurface（约 25MB）。
+//   那些调用会走「未知句柄」的安全分支；代价只是每死一个会话泄漏 ~200 字节结构体。
+//
+//   ★★★ v16 修正：上面那句「只泄漏 200 字节」**是错的** —— 本函数以前只摘映射、
+//   不释放缓冲，实际每次泄漏 3 个 IOSurface + 渲染缓冲（1600x900 约 28MB）。本机显存
+//   仅 256MB，泄漏约 9 次即耗尽 → 后续 CVPixelBufferCreate 报 -6662 → 新会话无缓冲 →
+//   **连上去没画面**（实测日志 216 次分配失败即此）。现在补上 release_frames(s)：
+//   结构体仍留着防 UAF，但**大块内存（缓冲）立刻还回去**。
 static void slot_detach(Shim *s) {
     if (!s) return;
     pthread_mutex_lock(&g_lock);
@@ -597,6 +641,17 @@ static void slot_detach(Shim *s) {
         s->dead = 1;
     }
     pthread_mutex_unlock(&g_lock);
+    // ★ v16：释放缓冲。仅当采集线程未启动（started==0）时释放 —— 有线程在用就绝不碰，
+    //   宁可晚一步回收也不能 use-after-free。本函数的唯一调用点是 my_start 失败分支，
+    //   那里 started 必为 0；这里再加一道读取保证正确性。
+    if (!s->started) {
+        double mb = shim_mb(s);
+        release_frames(s);
+        ulog("槽位让出：已释放该会话缓冲（约 %.1f MB，防显存泄漏；结构体保留防 use-after-free）", mb);
+        bufs_account("让出后");
+    } else {
+        ulog("!! 槽位让出时采集线程仍在运行 → 本次不释放缓冲（防 use-after-free），交由 stop 处理");
+    }
 }
 
 // 返回 0 = 缓冲就绪；非 0 = 分配失败
@@ -674,6 +729,12 @@ static int alloc_buffers(Shim *s) {
     }
 
     s->released = 0;
+    // ★ v16：记账（只计一次；release_frames 对称减回来）
+    if (!s->had_bufs) {
+        s->had_bufs = 1;
+        __sync_fetch_and_add(&g_live_buf_sessions, 1);
+        __sync_fetch_and_add(&g_live_buf_bytes, (long)(shim_mb(s) * 1024.0 * 1024.0));
+    }
     return 0;
 }
 
@@ -773,6 +834,9 @@ static int32_t my_stop(CGDisplayStreamRef ref) {
     release_frames(s);
     s->released = 1;
     s->stopped_ms = now_ms();
+    // ★ v16：stop 后记账归位。正常使用时这里应回落到 0 会话 / 0 MB；
+    //   若只涨不落，就是又出现了新的泄漏路径（这次两处就是这么找出来的）。
+    bufs_account("stop 后");
     return 0;
 }
 

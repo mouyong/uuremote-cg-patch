@@ -233,6 +233,19 @@
       ],
       "status": "done",
       "evidence": "★ 逐条排除（都是这次实测做的）：控制端能看到别的 3 台设备、本机能从自己的视角看到 101 的笔记本在线 → 两侧与 UU 服务器通信都正常；TCC 里辅助功能/屏幕录制授权都在；UU 进程与网络连接都正常；101 上 server 常驻（父进程=UURemoteService），macmini 上从 01:48 起就没有。★ 决定性实验：杀掉 server 后观察 **60 秒**，UURemoteService **不会**把它拉起来，设备一直离线；手动启动 server（`Contents/Helpers/UURemoteServer`）后**设备立刻回到在线**（isOnline=true）且端到端出帧正常。修法：① 新增 `com.uuremote-cg-patch.server` LaunchAgent（RunAtLoad + KeepAlive）托管 server —— 登录即起、被杀自起、与 UU 其它组件解耦；② `sign_main` 与 `shim_install_main` 收尾都调 `server_agent_up`（它们前面都 pkill 过 server）；③ 看门狗原来写着「没有 server：UU 按需拉起，属正常」——**该假设已被实测推翻**，改为兜底把 server 拉起来；④ 新增命令 `server-agent` / `server-agent-status` / `server-agent-down`、`watchdog-install`。★ 验证：KeepAlive 生效（杀掉后 launchd 2 秒内自动重启，ppid=1）；看门狗从零恢复（先卸载托管+杀掉 → 看门狗一次调用即重建 plist 并拉起，设备回到在线）；安装收尾路径走通；端到端 test.sh 全 PASS。★ 附带的测试口径修正（防假红）：test.sh 里「回调待回必须 =0」过严 —— 采样瞬间可能正有回调在飞（实测 待回=1，而同一会话 stop 行写「回调进206/出206 待回0 排空=是」）；改为「≤2 视为在飞」+「若窗口内有 stop 行则其排空结论必须是『是』」，两种故障态（持续积压、排空=否）都注入验过能报红。另加「先等设备上线再观测」（UU_TEST_ONLINE_WAIT，默认 90s），避免 server 刚重启的上报延迟窗口被误判成补丁故障。"
+    },
+    {
+      "id": "feat-118",
+      "name": "连上没画面：让出槽位/超时回收只摘映射不释放缓冲（显存泄漏）—— 已修 + 加缓冲记账",
+      "description": "症状：别的设备连上本机看不到画面。真根因在 shim 内部的两条路径：slot_detach（start 失败让出槽位）与「create 后超 60 秒未 start」的回收块，都只把槽位映射置空、**不调用 release_frames** —— 每个被回收的会话永久漏掉 3 个 IOSurface + 渲染缓冲 + 变化检测快照（1600x900 约 27.5MB）。本机显存仅 256MB，漏约 9 次即耗尽 → 后续 CVPixelBufferCreate 报 -6662 → 新会话拿不到缓冲 → my_start 走「无可用缓冲，跳过启动采集线程」→ 客户端永远没画面。日志实证：『无可用缓冲』44 次、『CVPixelBufferCreate[0] 失败』48 次，集中在用户报障时段（01:07–03:11）。",
+      "fix": "两处补 release_frames()（结构体仍刻意不 free，防 UU 持句柄调 stop 造成 use-after-free）；释放前判 started==0，有采集线程在跑则绝不释放。并新增缓冲记账（g_live_buf_sessions/g_live_buf_bytes + 让出后/回收后/stop 后 三处打点），把『泄漏有没有真消失』变成机器可核对的数。",
+      "evidence": "① 记账读到非零也读到零：会话中『活跃 1 会话 / 约 27.5 MB』，断开后『活跃 0 会话 / 0.0 MB』——量级与推算的 27.5MB/会话精确吻合；② 回收后打点=1（不是 2），证明回收路径真的释放了；③ 8+8 轮连断churn 后：无可用缓冲 44→44、分配失败 48→48（零新增），RSS 第二轮仅 +11MB（第一轮 213MB）→ 内存确实归还、只余分配器复用；④ 设备在线、照常出帧、v16 横幅在位。",
+      "files": [
+        "shim/libuushim.c",
+        "shim/libuushim.dylib"
+      ],
+      "status": "done",
+      "date": "2026-09-28"
     }
   ]
 }
