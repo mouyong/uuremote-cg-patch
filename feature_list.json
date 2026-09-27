@@ -195,6 +195,16 @@
       ],
       "status": "not-started",
       "evidence": ""
+    },
+    {
+      "id": "feat-114",
+      "name": "恢复真实脏矩形：让 UU 在画面静止时不推流（对标 VNC 的省 CPU 模型）",
+      "description": "现状：shim 把两个「画面有没有变」的信号都中立化了 —— ① `CGDisplayStreamUpdateGetRects` 恒返回整屏（libuushim.c:13 注释自陈：原本返回 0x0 会让 UU 认为没变化而不推流，为了先出画面改成整屏）；② 每帧轮换 3 个 surface（libuushim.c:126-129：UU 有 IOSurfaceFrame::CheckIfFrameChange，按 surface 身份判变化，复用同一 surface 会被判「没变」）。结果 UU 认为**每一帧都是新的、且整屏都变了** → 画面完全静止时也在逐帧软编，这是 235~274% CPU 的一部分。目标：算出**真实的**变化区域（分块比较上一帧，或只比较降采样块），静止时如实报告「没变化」→ UU 自己不推流 → 省下的 CPU 给真正变化的帧，**有效帧率反而更高**。这也是 macOS 自带屏幕共享 CPU 低的核心原因（VNC RFB 只在变化时发数据）。必须先做的实验：① UU 对「部分脏矩形」的处理是否正确（协议层是否只认整屏）；② 退回 0x0 会不会重演当初的完全不推流/黑屏（那正是这条被改掉的原因）—— 要有可回退开关与逐层验证；③ 脏矩形计算本身的开销必须显著低于它省下的编码开销，否则白忙。",
+      "dependencies": [
+        "feat-001"
+      ],
+      "status": "not-started",
+      "evidence": "线索已定位到具体行号（见 description）。判据可沿用现有日志：`脏矩形=` 计数 + 上行流量 + CPU%。"
     }
   ]
 }
