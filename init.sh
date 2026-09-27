@@ -27,7 +27,7 @@ echo "=== ① 项目文件完整性（缺一即断引用链）==="
 for f in uu.sh patch_tool.py \
          orig.version UURemote.entitlements \
          shim/libuushim.c shim/libuushim.dylib \
-         cpupath/libuucpupath.c cpupath/install.sh cpupath/uninstall.sh cpupath/status.sh \
+         cpupath/libuucpupath.c \
          tools/setmode README.md test.sh; do
   if [ -e "${f}" ]; then ok "${f}"; else bad "${f} 缺失"; fi
 done
@@ -48,7 +48,7 @@ done
 # ---------- ② 静态检查：脚本语法 ----------
 echo
 echo "=== ② 静态检查（shell 语法 = 本项目的 lint / compile）==="
-for s in uu.sh init.sh cpupath/install.sh cpupath/uninstall.sh cpupath/status.sh; do
+for s in uu.sh init.sh; do
   [ -f "$s" ] || continue
   if bash -n "$s" 2>/dev/null; then ok "bash -n $s"; else bad "bash -n $s 语法错误"; fi
 done
@@ -98,7 +98,7 @@ UU_PLIST="/Library/LaunchAgents/com.netease.uuremote.agent.plist"
 if [ -f "$UU_PLIST" ] && sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
   ok "cpupath 已精准注入 UU 的 LaunchAgent plist"
 else
-  warn "UU plist 里没有 cpupath 注入 → 无 Metal 的机器会黑屏（跑 bash cpupath/install.sh）"
+  warn "UU plist 里没有 cpupath 注入 → 无 Metal 的机器会黑屏（跑 bash uu.sh cpupath-install）"
 fi
 
 # 4.3 ★★ 全局注入必须为空（非空 = 正在伤害整个系统）
@@ -109,7 +109,7 @@ else
   bad "全局 DYLD_INSERT_LIBRARIES 非空：[$G]"
   echo "         所有进程都会去加载未签名库 → 被 CODESIGNING 直接 SIGKILL"
   echo "         （实测一天 141 份系统进程崩溃报告 + 系统卡顿）"
-  echo "         修复：launchctl unsetenv DYLD_INSERT_LIBRARIES && bash cpupath/install.sh"
+  echo "         修复：launchctl unsetenv DYLD_INSERT_LIBRARIES && bash uu.sh cpupath-install"
 fi
 
 # ---------- ⑤ 运行态：看门狗 ----------

@@ -127,6 +127,57 @@ bash uu.sh watchdog --dry
 
 ## 历史会话（追加式，倒序）
 
+### 2026-09-27 · cpupath 并入 uu.sh + 删 v13 + 修 shim-restore 覆盖顺序
+
+**用户提的六个问题逐条查证后处理**（含两个"你的前提其实不成立"的更正）：
+
+1. **`.c` vs `.swift` vs `.sh` 的分工**：侵入别人进程（换 vtable 槽 / 改函数指针 / CPU memcpy
+   顶替 Metal）必须用 **C**；只调公开 API 的小工具（切显示模式）用 **Swift** 快；
+   装机/还原/状态流程编排用 **sh**。一句话：侵入用 C，公开 API 用 Swift，编排用 sh。
+2. **cpupath 三个 sh** = 一个补丁的生命周期三件套（装/查/卸）。缺 status → 出问题没法自查；
+   缺 uninstall → 出事只能手改系统文件。**已按要求并入 uu.sh**（见下）。
+3. **`shim/backup/UURemoteServer.orig` 不能删** —— 用户以为"反正能再编译"，但它是
+   **UU 原厂二进制**（24MB），编译不出来，且是本地**唯一还原源**：
+   实测现役 `UURemoteServer` 依赖数 = 1（已注入），该备份 = 0（干净原文）；
+   `uu.sh:1313` 写死「备份缺失 → 无法还原，请去官网覆盖安装」。删了就失去回退路径
+   （在注入态重跑 shim-install 重建出的还是污染版）。已把这条判据写进技能。
+4. **`shim/libuushim.dylib` 必须留** —— 它在装机路径上（`shim_install_main` 直接取文件，
+   脚本**不会**自动编译）。且它与 App 内现役那份**不是同一个**：仓库 33000 字节未签名 /
+   App 内 51600 字节已签名（都是 v14）。判据是 `shim-status` 报"补丁库在位"+ 会话真出帧，**不是字节数**。
+5. **`tools/` 8 个文件全留** —— 核心 1（`insert_dylib.py` 插 LC_LOAD_DYLIB）+ 监测 3 + 演练 1 +
+   整理 1 + setmode 1 对。删除收益（几十 KB）远小于不确定性。
+6. **`UURemote.entitlements` 必须留** —— `uu.sh:120` 强制要求，找不到直接 `exit 1`；
+   内含 UU 自己的 `audio-input` + `bluetooth` 声明，重签时必须原样带上。
+
+**做了三件事**：
+
+- **删 `shim/libuushim_v13.dylib`**（用户指示）。删前证明可从 git 历史取回：
+  `git show f415dbd:shim/libuushim_v13.dylib | md5` 与工作区**逐字节一致**（`5e14dd3f…`）。
+  注：v13 **不能**由当前 `.c` 重建 —— 现在的源码编译出的是 v14（初始提交的 `.c` 里 v13 标识数 = 0）。
+- **cpupath 三件套并入 `uu.sh`**：→ `cpupath-install` / `cpupath-status` / `cpupath-uninstall`
+  （逻辑逐字照搬，只改路径推导与提示语）。**顺带补上一个真缺口**：`install`（号称"一键装全套"）
+  此前只做 cg-install + shim-install，**从来没有第 4 道门** → 现在补成三步，
+  `restore` 同理补成三步，`status` 也加了第 4 道门段落。
+  - 路径推导刻意不用 `$HOME`：本脚本常以 sudo 跑，那时 `$HOME` 会变成 `/var/root`，
+    会把库和 LaunchAgent 装错位置 → 改为按 `SUDO_USER` 的 `NSSHomeDirectory` 推导。
+  - 验证：`bash -n` 通过、`bash uu.sh help` 可见、`bash uu.sh cpupath-status` 真实跑通
+    （报出补丁库在位 / UU plist 已注入 / 全局注入为空）。
+  - 12 处文档引用同步改完，死引用复查 **0**。
+- **修 `shim-restore` 覆盖顺序缺陷**（取证时发现的真 bug，不在用户问题里）：
+  原逻辑先 `cp 备份 → 目标`、**之后**才校验备份是否含补丁依赖；一旦备份被污染
+  （在已注入态重跑 `shim-install` 就会覆盖备份），目标已被污染件写掉、本地又没有第二份原库
+  → 只能重装 UU。改为**先校验来源、再覆盖目标**。
+  - **双向注入测试**（/tmp 沙箱，不碰真文件）：污染备份下**修前目标被覆盖**
+    （`ORIGINAL-GOOD-CONTENT` 被写掉）→ **修后拒绝覆盖、md5 不变**；干净备份下正常还原不受影响。
+- **README 补三条重建命令**（用户"反正能再编译"的前提此前并不成立：编译命令根本没入库，
+  且 `shim` 缺 `-framework IOSurface` 会链接失败报 `_IOSurfaceCreate` 未定义）。
+  另记录两条防误判事实：仓库待装源 33000 / App 现役 51600（字节数不同属正常）；
+  编译产物**字节数可复现（33000）但 md5 每次不同**（Mach-O 每次编译换 `LC_UUID`）。
+  顺手删掉 README 里一个死条目（`libstreamer.dylib.patched`，早已清理）。
+
+**验证**：`./init.sh` 全通过；`bash -n uu.sh` 通过；`cpupath-status` 实跑正常。
+
+
 ### 2026-09-27 · 仓库瘦身 + 发布前复核
 
 - **清掉写死的本机专属路径**：全库 20 处（AGENTS.md / session-handoff.md / shim/README.md /

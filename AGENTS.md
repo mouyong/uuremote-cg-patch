@@ -27,9 +27,9 @@ Before writing code:
 
 | 门 | 位置 | 修什么 | 装机命令 |
 |---|---|---|---|
-| 第 1/3/4 道 | `patch_tool.py` | libstreamer 的三处磁盘补丁（Metal 门禁 / 编码器 / 低延迟 RC） | `sudo bash uu.sh cg-install` |
+| 第 1/3 道 | `patch_tool.py` | libstreamer 的三处磁盘补丁（Metal 门禁 / 编码器 / 低延迟 RC） | `sudo bash uu.sh cg-install` |
 | 第 2 道 | `shim/libuushim.c` | 帧源：用截图轮询顶替选不到的 CoreGraphics 采集器 | `sudo bash uu.sh shim-install` |
-| （配合） | `cpupath/libuucpupath.c` | CPU 顶替 Metal 做「采集帧 → 编码器输入帧」的转换 | `bash cpupath/install.sh` |
+| 第 4 道 | `cpupath/libuucpupath.c` | CPU 顶替 Metal 做「采集帧 → 编码器输入帧」的转换 | `bash uu.sh cpupath-install` |
 
 `sudo bash uu.sh install` = 全套（含重签名）。**UU 每次自动更新后重跑 install 即可**（版本自适应）。
 
@@ -39,7 +39,7 @@ Before writing code:
    所有进程（含系统守护进程、`pgrep`、`screencapture`）都会去加载我们的**未签名** dylib，
    被 macOS 的 CODESIGNING 保护直接 SIGKILL。
    实测代价：**一天 141 份系统进程崩溃报告**（前一日 1 份）、系统卡顿、System Settings 打不开。
-   正确做法：写进 **UU 自己的** LaunchAgent plist 的 `EnvironmentVariables`（见 `cpupath/install.sh`）。
+   正确做法：写进 **UU 自己的** LaunchAgent plist 的 `EnvironmentVariables`（见 `uu.sh cpupath-install`）。
    给 dylib 做 ad-hoc 签名**不能**避免此崩溃（实测无效）。
 2. **改完 plist 必须 `launchctl unload` + `load -w`** —— **`kickstart -k` 不会重读 plist**（实测会丢注入 → 黑屏）。
 3. **看门狗铁律：只要还在正常出帧就绝不动它**。会话进行中重启 server = 当场把用户踢下线。
@@ -158,7 +158,7 @@ Before ending a session:
 | 版本自适应定位与打补丁 | `patch_tool.py` |
 | 帧源（截图轮询） | `shim/libuushim.c`（**唯一真源**，任何 dylib 由它编译） |
 | CPU 顶替 Metal 转换 | `cpupath/libuucpupath.c` |
-| 注入方式与持久化 | `cpupath/install.sh` / `uninstall.sh` / `status.sh` |
+| 注入方式与持久化 | `uu.sh cpupath-install` / `cpupath-uninstall` / `cpupath-status` |
 | 分辨率切换 | `tools/setmode.swift`（编译产物 `tools/setmode`） |
 | 看门狗规则 | `uu.sh` 的 `watchdog_main` |
 | 根因与实测结论 | `evidence/*.md` + `README.md` |

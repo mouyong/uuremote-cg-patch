@@ -12,8 +12,8 @@
 #         → libuushim.dylib + LC_LOAD_DYLIB + 重签                [shim-install]
 #   第3道 编码器门禁：UU 要求「必须硬编」，本机只有软编
 #         → 磁盘补丁关掉该门禁（含在第1道里）
-#   第4道 像素路径：把 Metal 路径换成 CPU memcpy
-#         → cpupath/（已含在第1道补丁里）
+#   第4道 像素路径：把「采集帧 → 编码器输入帧」的转换从 Metal 渲染换成 CPU memcpy
+#         → cpupath/libuucpupath.dylib 注入 UU 自己的 LaunchAgent  [cpupath-install]
 #
 # 【怎么用】
 #   bash uu.sh status            # 先看状态（免 sudo，最常用）
@@ -1373,6 +1373,365 @@ EOT
 }
 
 
+# ---- cpupath 系列（原 cpupath/install.sh、status.sh、uninstall.sh 三件套，已于 2026-09-27 并入本文件）----
+# 说明：这三个子命令管的是「第4道门的持久化部分」——把 CPU 顶替 Metal 的
+# libuucpupath.dylib 注入进 UU 自己的 LaunchAgent。原先散在 cpupath/ 下三个脚本，
+# 现统一入口：bash uu.sh cpupath-install / cpupath-status / cpupath-uninstall
+
+cpupath_paths() {
+  # 刻意不用 $HOME：本脚本常以 sudo 运行，那时 $HOME 会变成 /var/root，
+  # 会把库和 LaunchAgent 装到错误的位置。改为按「真实登录用户」的 home 推导。
+  local u h
+  u="${SUDO_USER:-$(id -un)}"
+  h="$(dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  [ -n "$h" ] || h="$HOME"
+  CP_USER="$u"
+  CP_DEST_DIR="$h/Library/Application Support/UUCpuPath"
+  CP_PLIST="$h/Library/LaunchAgents/com.uuremote-cg-patch.cpupath.plist"
+  CP_LIBDST="$h/Library/Application Support/UUCpuPath/libuucpupath.dylib"
+  CP_UU_PLIST="/Library/LaunchAgents/com.netease.uuremote.agent.plist"
+}
+
+# ---- cpupath_install_main ----
+cpupath_install_main() {
+# 第4道门（CPU 顶替 Metal 帧转换）的安装与持久化。
+#
+# 作用：让 UU远程 在无 Metal 的老 Mac（AMD pre-GCN，如 2011 Mac mini）上也能把画面
+#       编出来并发出去，否则对端连接后永远黑屏 / 卡在"正在连接"。
+# 原理：运行时把 libstreamer 的 IOSurfaceFrame::CopyTo(VideoFrame&) 换成 CPU memcpy
+#       （原实现走 Metal 渲染，无 Metal 必然失败 → 编码器收不到帧）。
+#       不改 UU 二进制，只注入一个 dylib。
+#
+# ★★★ 注入方式（2026-09-27 改，原因务必读完再动）
+#   正确做法：把 DYLD_INSERT_LIBRARIES 写进 **UU 自己的 LaunchAgent plist** 的
+#             EnvironmentVariables —— 只有 UU 及其子进程会加载本库。
+#   禁止做法：`launchctl setenv DYLD_INSERT_LIBRARIES ...`
+#             —— 那是 launchd 用户域**全局**变量，所有由 launchd 启动/继承环境的进程
+#             都会读到它（AppleSpell、bluetooth、cloudd、Keychain、ScreenTime、
+#             ScreenSharing、devicecheckd、biomesyncd、ModelCatalogAgent、
+#             甚至命令行工具 pgrep / screencapture …）。
+#             这些进程带 Apple 签名 + library validation，加载**未签名** dylib 会触发
+#             CODESIGNING 保护被直接 SIGKILL（崩溃特征：namespace=CODESIGNING,
+#             signal=SIGKILL (Code Signature Invalid)）。
+#   实测代价：安装全局注入当天产生 141 份系统进程崩溃报告（前一天只有 1 份）；
+#             screencapture / pgrep 一类工具执行即被杀（易误判成"没有录屏权限"）；
+#             系统卡顿，连 System Settings 都可能起不来。收窄到 plist 后立刻安静。
+#   注意：给 dylib 做 ad-hoc 签名（本命令仍会做）**并不能**避免上述崩溃 ——
+#         实测无效，必须靠收窄注入范围。
+#
+# 持久化两层：
+#   ① 改 /Library/LaunchAgents/com.netease.uuremote.agent.plist（注入本体，需 sudo）
+#   ② 本工具自己的 LaunchAgent（登录时幂等复核；UU 升级覆盖 ① 后能自动补回）
+#
+# 用法：bash uu.sh cpupath-install
+cpupath_paths
+
+LIBSRC="$D/cpupath/libuucpupath.dylib"
+DEST_DIR="$CP_DEST_DIR"
+LIBDST="$CP_LIBDST"
+PLIST="$CP_PLIST"
+UU_PLIST="$CP_UU_PLIST"
+
+if [ ! -f "$LIBSRC" ]; then
+    no "找不到 $LIBSRC —— 先编译："
+    echo "   clang -dynamiclib -O2 -o cpupath/libuucpupath.dylib cpupath/libuucpupath.c \\"
+    echo "         -framework CoreVideo -framework CoreFoundation -framework IOSurface"
+    exit 1
+fi
+
+hd "1/6 安装运行时文件"
+mkdir -p "$DEST_DIR"
+cp -f "$LIBSRC" "$LIBDST"
+xattr -c "$LIBDST" 2>/dev/null
+codesign -f -s - "$LIBDST" 2>/dev/null
+echo "   ${LIBDST}（$(stat -f%z "$LIBDST") 字节）"
+
+hd "2/6 把注入写进 UU 自己的 LaunchAgent（只对 UU 生效）"
+if [ ! -f "$UU_PLIST" ]; then
+    no "找不到 ${UU_PLIST} —— UU 未按标准方式安装？中止以免注入到错误位置"
+    exit 1
+fi
+# 改系统目录里的 plist 需要 sudo；无权限时明确报错，不要静默失败。
+sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$UU_PLIST" 2>/dev/null
+sudo -n /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:DYLD_INSERT_LIBRARIES $LIBDST" "$UU_PLIST" 2>/dev/null \
+  || sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string $LIBDST" "$UU_PLIST"
+if [ $? -ne 0 ]; then
+    no "写入失败（需要 sudo 权限）"
+    exit 1
+fi
+echo "   语法校验：$(sudo -n plutil -lint "$UU_PLIST" 2>&1)"
+sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -A2 EnvironmentVariables | sed 's/^/     /'
+
+hd "3/6 撤销历史遗留的全局注入（重要：它才是伤害系统的那个）"
+if [ -n "$(launchctl getenv DYLD_INSERT_LIBRARIES 2>/dev/null)" ]; then
+    launchctl unsetenv DYLD_INSERT_LIBRARIES
+    ok "已清除（原值见 git 历史/安装日志）"
+else
+    ok "全局变量本来就是空的"
+fi
+echo "   现在 DYLD_INSERT_LIBRARIES=[$(launchctl getenv DYLD_INSERT_LIBRARIES)]"
+
+hd "4/6 写登录时复核用的 LaunchAgent（UU 升级覆盖 UU plist 后自动补回）"
+mkdir -p "$(dirname "$PLIST")"
+cat > "$DEST_DIR/apply.sh" <<EOF
+#!/bin/bash
+# 登录时由 LaunchAgent 调用：幂等复核 UU 的 plist 里是否还有我们的注入。
+# ★ 这里**只改 UU 自己的 plist**，绝不调 launchctl setenv（全局变量会伤害系统进程）。
+UU_PLIST="$UU_PLIST"
+LIB="$LIBDST"
+LOG="$DEST_DIR/apply.out.log"
+[ -f "\$LIB" ] || exit 0
+[ -f "\$UU_PLIST" ] || exit 0
+if sudo -n plutil -p "\$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
+    echo "\$(date '+%F %T') 注入仍在 UU plist 中，无需处理" >> "\$LOG"
+    exit 0
+fi
+# UU 升级覆盖了 plist → 补回
+sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "\$UU_PLIST" 2>/dev/null
+sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string \$LIB" "\$UU_PLIST" 2>/dev/null
+if sudo -n plutil -p "\$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
+    echo "\$(date '+%F %T') UU plist 被覆盖，已补回注入（下次 UU 重启生效）" >> "\$LOG"
+else
+    echo "\$(date '+%F %T') !! 补回失败（需要 sudo 权限），请手动运行 uu.sh cpupath-install" >> "\$LOG"
+fi
+exit 0
+EOF
+chmod +x "$DEST_DIR/apply.sh"
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.uuremote-cg-patch.cpupath</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$DEST_DIR/apply.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>$DEST_DIR/apply.err.log</string>
+  <key>StandardOutPath</key>
+  <string>$DEST_DIR/apply.out.log</string>
+</dict>
+</plist>
+EOF
+plutil -lint "$PLIST"
+# 立刻加载（RunAtLoad 只在下一次登录才生效；这里显式加载一次）
+launchctl unload "$PLIST" 2>/dev/null
+launchctl load -w "$PLIST" 2>/dev/null
+if launchctl print "gui/$(id -u)/com.uuremote-cg-patch.cpupath" >/dev/null 2>&1; then
+  ok "复核用 LaunchAgent 已加载"
+else
+  echo "   ！复核用 LaunchAgent 未加载（下次登录仍会生效）"
+fi
+
+hd "5/6 让 UU 重读 plist 并生效"
+# ★ 必须 unload + load：kickstart 不会重读 plist（实测新进程拿不到新环境变量）。
+launchctl unload "$UU_PLIST" 2>/dev/null
+sleep 3
+launchctl load -w "$UU_PLIST" 2>/dev/null
+sleep 8
+NEWPID="$(pgrep -x UURemoteService | head -1 || true)"
+if [ -n "$NEWPID" ]; then
+    if ps eww "$NEWPID" 2>/dev/null | tr ' ' '\n' | grep -q DYLD_INSERT; then
+        ok "UU agent(pid=${NEWPID}) 已从 plist 取得注入"
+    else
+        no "UU agent 未取得注入（plist 可能未生效）"
+    fi
+fi
+if [ "$REHEARSE" != "1" ]; then
+  sudo -u "$CP_USER" open -a UURemote 2>/dev/null || open -a UURemote 2>/dev/null || true
+  sleep 6
+fi
+
+hd "6/6 验证"
+if grep -q "vtable 槽替换" /tmp/uucpu.log 2>/dev/null; then
+    ok "修复已生效"
+    grep -E "libuucpupath 已加载|vtable 槽替换" /tmp/uucpu.log 2>/dev/null | tail -2 | sed 's/^/     /'
+else
+    echo "   ！未检测到生效记录，最近日志："
+    tail -5 /tmp/uucpu.log 2>/dev/null || echo "   （无日志）"
+fi
+echo
+echo "   当前加载本库的进程（应该只有 UU 系的）："
+sudo -n lsof -n 2>/dev/null | grep -i libuucpupath | awk '{print $1}' | sort -u | head -10 | sed 's/^/     /'
+
+echo
+echo "完成。"
+echo "  注入位置：$UU_PLIST 的 EnvironmentVariables（只对 UU 生效）"
+echo "  持久化：  ① 上述 plist（UU 升级会覆盖 → ② 补回）"
+echo "            ② ${PLIST}（登录时幂等复核，见 ${DEST_DIR}/apply.out.log）"
+echo "  依赖项：libstreamer.dylib 的磁盘补丁（Metal 门禁 / 低延迟 RC）需另行保持，"
+echo "          见 patch_tool.py + bash uu.sh cg-install；UU 自动更新会覆盖，需重跑。"
+}
+
+
+# ---- cpupath_status_main ----
+cpupath_status_main() {
+# 第4道门（CPU 顶替 Metal）的状态检查。免 sudo 可跑（内部按需 sudo -n）。
+cpupath_paths
+
+DEST_DIR="$CP_DEST_DIR"
+PLIST="$CP_PLIST"
+LABEL="com.uuremote-cg-patch.cpupath"
+UU_PLIST="$CP_UU_PLIST"
+
+hd "UU CPU 转换路径修复 状态"
+
+echo "1) 运行时文件"
+if [ -f "$DEST_DIR/libuucpupath.dylib" ]; then
+    ok "${DEST_DIR}/libuucpupath.dylib（$(stat -f%z "$DEST_DIR/libuucpupath.dylib") 字节, $(stat -f%Sm "$DEST_DIR/libuucpupath.dylib")）"
+else
+    no "未安装"
+fi
+
+echo
+echo "2) 注入位置（正确做法：只在 UU 自己的 LaunchAgent plist 里）"
+if [ -f "$UU_PLIST" ]; then
+    UU_INJ="$(sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -o 'libuucpupath[^"]*' | head -1)"
+    if [ -n "$UU_INJ" ]; then
+        ok "UU plist 已注入：${UU_INJ}"
+        UPID="$(pgrep -x UURemoteService | head -1 || true)"
+        if [ -n "$UPID" ] && ps eww "$UPID" 2>/dev/null | tr ' ' '\n' | grep -q DYLD_INSERT; then
+            ok "当前 UU agent(pid=${UPID}) 已取得该变量"
+        else
+            echo "   ！UU agent 进程里没有该变量（plist 改动尚未生效）→ bash uu.sh cpupath-install"
+        fi
+    else
+        no "UU plist 里没有注入（对端会黑屏）→ bash uu.sh cpupath-install"
+    fi
+else
+    no "找不到 ${UU_PLIST}（UU 未安装？）"
+fi
+
+echo
+echo "3) ★ 全局注入检查（必须为空 —— 非空会伤害整个系统）"
+G="$(launchctl getenv DYLD_INSERT_LIBRARIES 2>/dev/null)"
+if [ -n "$G" ]; then
+    no "全局变量非空：[${G}]"
+    echo "       后果：所有 launchd 进程（系统守护进程、pgrep、screencapture…）都会去加载"
+    echo "             未签名 dylib，被 macOS 的 CODESIGNING 保护直接 SIGKILL。"
+    echo "             实测一天产生 135+ 份系统进程崩溃报告、系统卡顿、System Settings 打不开。"
+    echo "       修复：launchctl unsetenv DYLD_INSERT_LIBRARIES  （然后 bash uu.sh cpupath-install）"
+else
+    ok "为空（正确）"
+fi
+
+echo
+echo "4) 当前哪些进程加载了本库（应只有 UU 系；其它是撤销全局前的遗留，会自然消失）"
+sudo -n lsof -n 2>/dev/null | grep -i libuucpupath | awk '{print $1}' | sort -u | head -12 | sed 's/^/   /'
+echo "   合计映射条数：$(sudo -n lsof -n 2>/dev/null | grep -ci libuucpupath)"
+
+echo
+echo "5) UU 进程内是否真的生效"
+if grep -q "vtable 槽替换" /tmp/uucpu.log 2>/dev/null; then
+    grep -E "libuucpupath 已加载|vtable 槽替换" /tmp/uucpu.log 2>/dev/null | tail -3 | sed 's/^/   /'
+    echo "   （日志：/tmp/uucpu.log）"
+else
+    echo "   ！日志中无生效记录（可能尚未有会话，或未安装）"
+fi
+
+echo
+echo "6) 登录时幂等复核（UU 升级覆盖 plist 后能自动补回）"
+if [ -f "$PLIST" ]; then
+    ok "plist 存在"
+    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && ok "已加载" || echo "   ！已写文件但未加载"
+    [ -f "$DEST_DIR/apply.out.log" ] && tail -2 "$DEST_DIR/apply.out.log" 2>/dev/null | sed 's/^/      /'
+else
+    no "无 plist（UU 升级后不会自动补回）"
+fi
+
+echo
+echo "7) UU 组件进程"
+pgrep -fl "UURemoteServer|MacOS/UURemote" | head -4 | sed 's/^/   /'
+
+echo
+echo "8) 磁盘补丁（配合项：Metal 门禁 / 低延迟 RC）"
+if [ -f "$TOOL" ] && [ -f "$LIB" ]; then
+    python3 "$TOOL" check "$LIB" 2>/dev/null | head -6 | sed 's/^/   /' || echo "   （检查失败）"
+else
+    echo "   ！找不到 patch_tool.py 或 libstreamer.dylib"
+fi
+echo "   注：UU 自动更新会覆盖磁盘补丁，需重跑 bash uu.sh install（需一次 sudo）"
+
+echo
+echo "9) 最近一次会话的拷贝吞吐"
+grep -E "★ 成功" /tmp/uucpu.log 2>/dev/null | tail -2 | cut -c1-120 | sed 's/^/   /' || echo "   （无会话记录）"
+echo
+echo "=========================================================="
+}
+
+
+# ---- cpupath_uninstall_main ----
+cpupath_uninstall_main() {
+# 第4道门的卸载（恢复原状）。做了什么：
+#   ① 从 UU 自己的 LaunchAgent plist 里移除我们加的 DYLD_INSERT_LIBRARIES（只删这个键）
+#   ② 清除历史遗留的**全局**注入变量（老版本曾用 launchctl setenv，会伤害系统进程）
+#   ③ 删掉本工具自己的运行时目录与 LaunchAgent
+# 说明：plist 无需显式卸载 —— 删掉文件后下次登录不再加载；
+#       当前会话中若已加载，因目录已删除它什么也不做（无害）。
+# 用法：bash uu.sh cpupath-uninstall
+cpupath_paths
+
+DEST_DIR="$CP_DEST_DIR"
+PLIST="$CP_PLIST"
+UU_PLIST="$CP_UU_PLIST"
+
+hd "1/5 从 UU plist 移除注入（只删我们的键）"
+if [ -f "$UU_PLIST" ]; then
+    # 若 EnvironmentVariables 里只有我们这一个键，就删整个 dict；否则只删该键
+    NKEYS="$(sudo -n plutil -p "$UU_PLIST" 2>/dev/null | awk '/EnvironmentVariables/{f=1;next} f&&/^\s+"/{c++} END{print c+0}')"
+    if sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -q "DYLD_INSERT_LIBRARIES"; then
+        if [ "${NKEYS:-0}" -le 1 ]; then
+            sudo -n /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables" "$UU_PLIST" 2>&1
+            ok "已删除 EnvironmentVariables（其中只有本工具的键）"
+        else
+            sudo -n /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" "$UU_PLIST" 2>&1
+            ok "已删除 DYLD_INSERT_LIBRARIES（保留了 EnvironmentVariables 里的其它键）"
+        fi
+        echo "   语法校验：$(sudo -n plutil -lint "$UU_PLIST" 2>&1)"
+    else
+        ok "UU plist 中本就没有本工具的注入"
+    fi
+else
+    echo "   找不到 ${UU_PLIST}（UU 未安装？）—— 跳过"
+fi
+
+hd "2/5 删除本工具的 LaunchAgent 与运行时目录"
+[ -f "$PLIST" ] && rm -f "$PLIST" && ok "已删除 ${PLIST}" || echo "   无需删除 ${PLIST}"
+[ -d "$DEST_DIR" ] && rm -rf "$DEST_DIR" && ok "已删除 ${DEST_DIR}" || echo "   无需删除 ${DEST_DIR}"
+
+hd "3/5 清除全局注入变量（历史遗留，务必清）"
+launchctl unsetenv DYLD_INSERT_LIBRARIES
+echo "   DYLD_INSERT_LIBRARIES=[$(launchctl getenv DYLD_INSERT_LIBRARIES)]"
+
+hd "4/5 让 UU 重读 plist（unload + load；kickstart 不会重读）"
+launchctl unload "$UU_PLIST" 2>/dev/null
+sleep 3
+launchctl load -w "$UU_PLIST" 2>/dev/null
+if [ "$REHEARSE" != "1" ]; then
+  sleep 8
+  sudo -u "$CP_USER" open -a UURemote 2>/dev/null || open -a UURemote 2>/dev/null || true
+  sleep 6
+fi
+
+hd "5/5 UU 组件状态"
+pgrep -fl "UURemoteServer|MacOS/UURemote" | head -4 | sed 's/^/   /'
+
+echo
+echo "完成。UU 已恢复原状（画面会再次黑屏 —— 因本机无 Metal）。"
+echo "注意：libstreamer.dylib 的磁盘补丁属于另一个环节，未在此卸载；"
+echo "      如需一并还原，见 bash uu.sh cg-restore 与备份文件 libstreamer.dylib.orig。"
+}
+
+
 # ---- reset_main ----
 reset_main() {
 # 修复「重连连不上」：终止卡死的 UURemoteServer，UU 会自动重生一个干净的
@@ -1670,6 +2029,20 @@ cmd_status_all() {
   [ "$n" -gt 0 ] && ok "UURemoteServer 已注入依赖（$n 条）" || no "UURemoteServer 未注入依赖"
   echo "  已发布补丁库版本：$(strings "$D/shim/libuushim.dylib" 2>/dev/null | grep -m1 -o 'libuushim v[0-9]*' || echo '未知')"
 
+  hd "CPU 帧转换（第4道门）"
+  cpupath_paths
+  if [ -f "$CP_LIBDST" ]; then ok "补丁库在位：libuucpupath.dylib（$(stat -f%z "$CP_LIBDST") 字节）"; else no "补丁库不在位（未装或已卸载）"; fi
+  if sudo -n plutil -p "$CP_UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
+    ok "已注入 UU 自己的 LaunchAgent（只对 UU 生效）"
+  else
+    no "UU plist 里没有注入 → bash $D/uu.sh cpupath-install"
+  fi
+  if [ -n "$(launchctl getenv DYLD_INSERT_LIBRARIES 2>/dev/null)" ]; then
+    no "★ 全局 DYLD_INSERT_LIBRARIES 非空 —— 正在伤害系统进程！修：launchctl unsetenv DYLD_INSERT_LIBRARIES"
+  else
+    ok "全局注入为空（正确）"
+  fi
+
   hd "进程与看门狗"
   local p
   for p in UURemote UURemoteServer UURemoteService UURemoteDaemon; do
@@ -1703,10 +2076,12 @@ cmd_status_all() {
 
 cmd_install_all() {
   need_root || return 1
-  hd "第1步：采集器 + 编码器门禁 + 像素路径（cg-install）"
+  hd "第1步：采集器 + 编码器门禁（cg-install）"
   cg_install_main || { no "cg-install 失败，已中止"; return 1; }
   hd "第2步：帧源 shim（shim-install）"
   shim_install_main || { no "shim-install 失败，已中止"; return 1; }
+  hd "第3步：CPU 顶替 Metal 帧转换（cpupath-install）"
+  cpupath_install_main
   hd "完成 —— 现在去手机端连一次"
   echo "  看不到画面时：bash $D/uu.sh status  →  然后 sudo bash $D/uu.sh reset"
 }
@@ -1717,6 +2092,8 @@ cmd_restore_all() {
   shim_restore_main
   hd "第2步：撤销采集器/门禁补丁"
   cg_restore_main
+  hd "第3步：撤销 CPU 帧转换注入"
+  cpupath_uninstall_main
   hd "完成 —— 已回到装本方案之前"
 }
 
@@ -1764,13 +2141,16 @@ UU远程 修复工具集 —— 单文件入口
   daemon              重启 root 守护进程（修「无法连接至服务器 1001」）[sudo]
 
 【安装 / 还原】（重装 UU、UU 自动更新覆盖补丁之后）
-  install             一键装全套 = cg-install + shim-install       [sudo]
-  restore             一键还原全套                                  [sudo]
-  cg-install          只装第1/3/4道门（libstreamer 三处补丁）        [sudo]
-  cg-restore          只还原上述三处补丁                            [sudo]
-  shim-install        只装第2道门（截图轮询帧源）                    [sudo]
-  shim-restore        只还原帧源替换                                [sudo]
-  sign                重新签名（修「设备不上线 / XPC 被拒」）        [sudo]
+  install             一键装全套 = cg-install + shim-install + cpupath-install  [sudo]
+  restore             一键还原全套                                              [sudo]
+  cg-install          只装第1/3道门（libstreamer 门禁补丁）                      [sudo]
+  cg-restore          只还原上述门禁补丁                                        [sudo]
+  shim-install        只装第2道门（截图轮询帧源）                                [sudo]
+  shim-restore        只还原帧源替换                                            [sudo]
+  cpupath-install     只装第4道门（CPU 顶替 Metal 帧转换 + 持久化）
+  cpupath-status      看第4道门状态（含"全局注入是否为空"检查）
+  cpupath-uninstall   只卸载第4道门
+  sign                重新签名（修「设备不上线 / XPC 被拒」）                    [sudo]
 
 【看门狗】
   watchdog [--dry]    执行一次检查（--dry 只诊断不动作）
@@ -1810,6 +2190,9 @@ case "${1:-help}" in
   cg-restore|unpatch)        cg_restore_main ;;
   shim-install)              shim_install_main ;;
   shim-restore)              shim_restore_main ;;
+  cpupath-install|cpupath)   cpupath_install_main ;;
+  cpupath-status)            cpupath_status_main ;;
+  cpupath-uninstall)         cpupath_uninstall_main ;;
   sign)                      sign_main ;;
   daemon|fix-daemon|xpc)     cg_daemon_main ;;
   reset)                     reset_main "${2:-}" ;;

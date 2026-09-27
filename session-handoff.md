@@ -75,8 +75,8 @@ bash uu.sh status         # 项目运行态总览
 | `feature_list.json` | 工作项状态的唯一事实源 | 同时最多一个 `in-progress` |
 | `progress.md` | 会话连续性日志（倒序追加） | 与 skill 的分工：长期结论进技能，会话轨迹进这里 |
 | `cpupath/libuucpupath.c` | 第 4 道门：CPU 顶替 Metal 帧转换 | ★ 泄漏修复在 `my_CopyTo`：新出口必须 `goto out` |
-| `cpupath/install.sh` | 注入安装（写 UU 自己的 plist） | ★ 绝不许退回 `launchctl setenv` |
-| `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 现役 v14；备份 `v13` 作回退（**只留这两个**，别再放重复版） |
+| `uu.sh cpupath-install` | 注入安装（写 UU 自己的 plist） | ★ 绝不许退回 `launchctl setenv` |
+| `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 只留现役 `libuushim.dylib`（v14）；v13 已删，需要时从 git 历史取 |
 | `tools/cleanup.py` | 项目整理（`uu.sh cleanup`，默认演练） | 清单易过时：**只列真实存在的项**，改完必跑一次演练核对 |
 | `tools/rehearse.sh` | 改脚本后的演练包装（AGENTS.md 铁律检查项） | 不碰正式 App、不要 sudo；日志落 `shim/rehearsal-*.log` |
 | `libstreamer.dylib.orig` | 官方原库备份 | **`restore` 唯一依赖，别删** |

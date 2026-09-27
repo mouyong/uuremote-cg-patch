@@ -42,7 +42,7 @@
     {
       "id": "feat-005",
       "name": "脚本整合为单一入口 uu.sh",
-      "description": "原 9 个脚本逐字并入 uu.sh（19 子命令），旧脚本归档可回退",
+      "description": "原 9 个脚本逐字并入 uu.sh（19 子命令）；cpupath 三件套当时**未**并入，已于 feat-112 补齐",
       "dependencies": [],
       "status": "done",
       "evidence": "bash -n 通过、结构自检 0 问题、只读子命令实测通过；当时把 9 个旧脚本归档作回退点（该归档目录后按「不搞 archive/」口径清除，撤销补丁改走 uu.sh restore / shim-restore）"
@@ -175,6 +175,16 @@
       ],
       "status": "done",
       "evidence": "跟踪文件 44→39。删除依据：README 从未承认该路线、stage/ 与 app-bundle-backup/ 两个产物目录始终不存在（从未实际使用）、uu.sh 无任何引用；功能已由 uu.sh install/restore 覆盖。**删除而非归档**（用户口径：不搞 archive/，靠 git 历史；这 4 个脚本本就在历史里，`git show bbf6f1d~1:<路径>` 可取回）。cleanup.py 改为「删除」策略并加保护：陈旧产物**必须 git 已跟踪**才删，未跟踪的一律跳过并报告。文档 8 处引用已同步。"
+    },
+    {
+      "id": "feat-112",
+      "name": "cpupath 三件套并入 uu.sh + 删除 v13（清掉最后一批散落脚本）",
+      "description": "把 cpupath/install.sh、status.sh、uninstall.sh 逐字并入 uu.sh，成为 cpupath-install / cpupath-status / cpupath-uninstall；顺带把 install/restore「全套」补上第 4 道门（此前号称「一键装全套」却一直漏掉 cpupath），status 也加第 4 道门段落。删除 shim/libuushim_v13.dylib。另修 uu.sh shim-restore 的覆盖顺序缺陷。",
+      "dependencies": [
+        "feat-005"
+      ],
+      "status": "done",
+      "evidence": "uu.sh +383 行（1826→2209），bash -n 通过；`bash uu.sh cpupath-status` 真实跑通（报出补丁库在位 / UU plist 已注入 / 全局注入为空）；help 可见三个新子命令。删前可恢复性证明：三个脚本从历史取回行数吻合（186/96/64），v13 的 `git show f415dbd:shim/libuushim_v13.dylib | md5` 与工作区逐字节一致（5e14dd3f…）。12 处文档引用同步，死引用复查 0；init.sh 全通过。shim-restore 修复经双向注入测试：污染备份下修前会覆盖目标（内容被写掉）、修后拒绝覆盖且 md5 不变；干净备份下正常还原不受影响。"
     }
   ]
 }

@@ -400,8 +400,8 @@ uuremote-cg-patch/
 ├─ patch_tool.py           ← 版本自适应定位/打补丁/反推官方库（uu.sh 调用）
 ├─ cert/                   ← 自签证书
 ├─ extra-ents/             ← 额外权限声明
-├─ cpupath/                ← 第 4 道门修复（CPU 顶替 Metal 帧转换）
-├─ shim/                   ← 帧源替换 shim（源码 + 现役/上一版 dylib + 原库备份）
+├─ cpupath/                ← 第 4 道门修复（CPU 顶替 Metal 帧转换；装/查/卸已并入 uu.sh）
+├─ shim/                   ← 帧源替换 shim（源码 + 现役 dylib + 原库备份）
 │   ├─ libuushim.c            源码（唯一真源）
 │   ├─ libuushim.dylib        现役待装源（= 最新版 v14）
 │   └─ backup/UURemoteServer.orig  UURemoteServer 原库（装机/还原的活依赖，别删）
@@ -414,8 +414,9 @@ uuremote-cg-patch/
 **回退**：整合前的 9 个脚本不再保留（其逻辑已逐字并入 `uu.sh`）。
 要撤销补丁用 `sudo bash uu.sh restore`，撤销 shim 用 `sudo bash uu.sh shim-restore`。
 
-**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本不再保留
-（需要时从 git 历史取：`git show <提交>:shim/libuushim_v13.dylib > /tmp/x.dylib`）。
+**版本管理**：`shim/` 只保留现役版（`libuushim.dylib`）；旧版不再留在工作区 ——
+需要时从 git 历史取（这是**取回方式**，v13 本身已于 2026-09-27 删除）：
+`git show <提交>:shim/libuushim_v13.dylib > /tmp/x.dylib`
 
 ### 重建命令（`libuushim.c` 是唯一真源，三条命令即可复原全部二进制）
 
@@ -562,7 +563,7 @@ generativeexperiencesd 等系统守护进程；**连 `pgrep`、`screencapture` �
 在每次登录时幂等复核并补回（`~/Library/Application Support/UUCpuPath/apply.sh`，
 日志 `apply.out.log`）。
 
-**自查**：`bash cpupath/status.sh` 第 3 节会明确检查全局变量是否为空（非空 = 正在伤害系统）。
+**自查**：`bash uu.sh cpupath-status` 第 3 节会明确检查全局变量是否为空（非空 = 正在伤害系统）。
 
 ## 关于分辨率：为什么「调显示模式」救不了帧率（实测推翻的结论）
 
