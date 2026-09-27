@@ -52,9 +52,15 @@ for s in uu.sh init.sh cpupath/install.sh cpupath/uninstall.sh cpupath/status.sh
   [ -f "$s" ] || continue
   if bash -n "$s" 2>/dev/null; then ok "bash -n $s"; else bad "bash -n $s 语法错误"; fi
 done
+# ★ 用内存里 compile() 而不是 py_compile：py_compile 会写出 __pycache__/*.pyc，
+#   等于「自检自己制造垃圾」（清理清单里正有 __pycache__，形成清了又生的循环）。
 for p in patch_tool.py tools/cleanup.py tools/insert_dylib.py; do
-  [ -f "$p" ] || continue
-  if python3 -m py_compile "$p" 2>/dev/null; then ok "py_compile $p"; else bad "py_compile $p 失败"; fi
+  [ -f "${p}" ] || continue
+  if python3 -c 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")' "${p}" 2>/dev/null; then
+    ok "语法 $p"
+  else
+    bad "语法 $p（Python 解析失败）"
+  fi
 done
 if [ -f shim/libuushim.c ]; then
   # 只做语法检查，不产出文件

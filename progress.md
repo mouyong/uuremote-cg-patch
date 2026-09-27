@@ -129,8 +129,8 @@ bash uu.sh watchdog --dry
 
 ### 2026-09-27 · 仓库瘦身 + 发布前复核
 
-- **清掉写死的本机路径**：`~/.hermes/uuremote-cg-patch` 全库 20 处（AGENTS.md / session-handoff.md /
-  shim/README.md / evidence 6 文件）→ 相对路径或「本项目根目录」。`~/Library/...` 系统路径**不动**（谁都用得上）。
+- **清掉写死的本机专属路径**：全库 20 处（AGENTS.md / session-handoff.md / shim/README.md /
+  evidence 6 文件）→ 相对路径或「本项目根目录」。`~/Library/...` 系统路径**不动**（谁用都成立）。
 - **克隆实测抓出 5 个问题**（这才是真验收 —— 只含 git 里的文件 = GitHub 用户拿到的内容）：
   ① `init.sh` 在新克隆里必然 FAIL（检查 `libstreamer.dylib.orig` 等 **gitignore 掉的原厂备份**，
   它们由首次 install 自动生成 → 改为 WARN）；② 我上一轮"修"的 `archive/` 引用反成新死链
@@ -140,7 +140,7 @@ bash uu.sh watchdog --dry
   转义成 `\346\240...` → 静默跳过全部中文名文件（44 个只真扫到 37 个）。
 - **门禁注入测试**（按规矩必须做）：往中文名 `.txt` 与 `.md` 各注入一条假私钥 →
   **旧逻辑 0/2 全漏，新逻辑 2/2 全中**；同时取消扩展名白名单（私钥贴进 README 也要能抓）。
-- **提交身份统一**：11 个提交改写为 `mouyong <10336437+mouyong@users.noreply.github.com>`；
+- **提交身份统一**：11 个提交改写为 GitHub 的 noreply 身份（不暴露个人邮箱）；
   逐个 tree 哈希核对**只换身份、代码零改动**；留标签 `pre-identity-rewrite` 作退路。
 - **仓库瘦身**：跟踪文件 44→39。删 25MB 可重建产物 + 纯重复 dylib（**先证明可重建**：
   `patch_tool.py patch` 产出与现有产物逐字节相同）；整组归档从未使用的免 sudo「整包换位」路线

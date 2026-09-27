@@ -112,8 +112,11 @@ bash uu.sh verify
 
 # 静态检查（本项目的 lint / compile）
 bash -n uu.sh && bash -n init.sh && bash -n test.sh
-python3 -m py_compile patch_tool.py tools/cleanup.py
+for p in patch_tool.py tools/cleanup.py tools/insert_dylib.py; do
+  python3 -c 'import sys; compile(open(sys.argv[1],encoding="utf-8").read(),sys.argv[1],"exec")' "$p" || echo "✘ $p"
+done
 clang -fsyntax-only shim/libuushim.c
+# ★ 别用 python3 -m py_compile：它会写出 __pycache__/*.pyc（自检自己制造垃圾）
 
 # ★ 铁律检查（必须为空，非空 = 正在伤害系统）
 launchctl getenv DYLD_INSERT_LIBRARIES
