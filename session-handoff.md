@@ -37,7 +37,7 @@ bash uu.sh status         # 项目运行态总览
 | # | 卡点 | 需要用户做什么 |
 |---|---|---|
 | B1 | **「无法连接至服务器」客户端侧定位** | 告知：哪个设备报的错 / 现在是否仍报 / 最好给截图。108 侧已实测连通，问题在客户端侧 |
-| B2 | **删 177MB `UURemote.app.before-certsign`** | 属主 root 且 `sudo rm -rf` 命中用户红线 → 需用户自己执行（或授权 chown 后由助手普通 rm） |
+| B2 | **删 177MB `UURemote.app.before-certsign`** | 属主 root:wheel，`sudo rm -rf` 命中用户红线 → 需用户执行。**已查明它可重建**（`uu.sh sign` 第 2 步每次签名都会 rm -rf 后 ditto 重建），删了不影响任何流程 → `sudo rm -rf <项目根>/UURemote.app.before-certsign`（删掉后项目体积 228MB→51MB） |
 | B3 | **推送到远端** | ① 定仓库名（已建议 `mouyong/uuremote-cg-patch`，账号下未占用）；<br>② 定**公开还是私有** —— README 教用户用网易 TeamID 签自签证书以通过 UU 内部校验，公开可能招法务；<br>③ 定是否加 LICENSE / 免责声明。<br>提交身份已统一（noreply），代码侧无需再改 |
 | B4 | **「允许在后台」显示名** | 选：A 只改看门狗 / B 4 个全改（界面显示脚本名而非 bash）/ C 不改 |
 | B5 | **重启机器一次** | 需在合适时机执行：可清 swap 历史脏页、清 BTM 失效登记、清撤销全局注入前遗留的库加载 |

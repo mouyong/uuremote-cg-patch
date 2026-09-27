@@ -98,10 +98,10 @@
     {
       "id": "feat-103",
       "name": "删除 177MB 的 UURemote.app.before-certsign",
-      "description": "只写不读、uu.sh sign 每次自会重建、9/14 快照已过期 → 可删，收益 253MB→50MB。属主 root 且 sudo rm -rf 命中用户红线",
+      "description": "删除 177MB 的 UURemote.app.before-certsign（项目体积的 78%）。★ 已查明它是 uu.sh sign 第 2/9 步「备份当前 App（可回退）」自动创建的：每次签名都 rm -rf 后 ditto 重建 → **可重建**，删除不会破坏任何流程。窗口期风险仅「这次签名前没有快照可回退」；且官方 App 可重新下载恢复。",
       "dependencies": [],
       "status": "blocked",
-      "evidence": "已证实无任何读取方（全仓 grep）。阻塞：需用户自己执行（或授权 chown 后由助手普通 rm）"
+      "evidence": "属主 root:wheel → 助手的 rm -rf 命中用户红线（不绕过，交用户执行）。唯一引用点是 uu.sh:878，且为「先删再建」的写法。命令：sudo rm -rf /Users/<user>/.hermes/uuremote-cg-patch/UURemote.app.before-certsign"
     },
     {
       "id": "feat-104",
