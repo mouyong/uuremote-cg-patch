@@ -67,6 +67,53 @@ if [ -f shim/libuushim.c ]; then
   if clang -fsyntax-only shim/libuushim.c 2>/dev/null; then ok "clang -fsyntax-only shim/libuushim.c"; else warn "libuushim.c 语法检查未通过（依赖框架头文件时可能误报）"; fi
 fi
 
+# 文档里提到的 uu.sh 子命令必须真实存在（★ 本检查因真实事故而加：
+#   曾在 README/progress 里写下 `uu.sh shim-status`，而该子命令根本不存在 ——
+#   死引用不会被任何别的检查发现，只会在用户照抄时才发现。）
+# 注意：只查「uu.sh <词>」形式；`for f in uu.sh patch_tool.py` 这类文件名列表
+# 会被下面「须跟已知子命令」的写法排除（patch_tool.py 不在子命令表里，但也不会被匹配）。
+DOCCHECK="$(python3 - <<'PYEOF' 2>/dev/null
+import re, glob, sys
+try:
+    src = open("uu.sh", encoding="utf-8").read()
+    dispatch = src[src.index('case "${1:-help}" in'):]
+except Exception:
+    sys.exit(0)
+real = set()
+for line in dispatch.split("\n"):
+    m = re.match(r"\s+([a-z][a-z0-9|_-]*)\)", line)
+    if m:
+        real.update(m.group(1).split("|"))
+mention = re.compile(r"uu\.sh\s+(?:<命令>\s+)?([a-z][a-z0-9-]*)\b")
+# 裸写形式：反引号里直接给子命令名（如 `shim-status`），不带 uu.sh 前缀。
+# 只查本项目特有的前缀，避免把 libuushim / disable-library-validation 之类误判。
+bare = re.compile(r"`([a-z][a-z0-9-]*)`")
+PROJ_PREFIX = ("cg-", "shim-", "cpupath-", "watchdog-", "wd-")
+bad = set()
+for f in glob.glob("*.md") + glob.glob("*.json") + ["AGENTS.md"]:
+    try:
+        t = open(f, encoding="utf-8").read()
+    except Exception:
+        continue
+    for m in mention.finditer(t):
+        c = m.group(1)
+        # 排除文件名（含扩展名）与已知子命令
+        if c not in real and not re.match(r".*\.(sh|py|md|json|dylib|c|swift)$", m.group(0).split()[-1]):
+            bad.add(c)
+    for m in bare.finditer(t):
+        c = m.group(1)
+        if c.startswith(PROJ_PREFIX) and c not in real:
+            bad.add(c)
+if bad:
+    print(" ".join(sorted(bad)))
+PYEOF
+)"
+if [ -z "$DOCCHECK" ]; then
+  ok "文档里的 uu.sh 子命令引用全部存在"
+else
+  bad "文档引用了不存在的 uu.sh 子命令：${DOCCHECK}"
+fi
+
 # ---------- ③ 依赖工具在位 ----------
 echo
 echo "=== ③ 依赖工具 ==="

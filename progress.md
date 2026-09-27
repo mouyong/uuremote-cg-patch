@@ -171,7 +171,7 @@ bash uu.sh watchdog --dry
    （在注入态重跑 shim-install 重建出的还是污染版）。已把这条判据写进技能。
 4. **`shim/libuushim.dylib` 必须留** —— 它在装机路径上（`shim_install_main` 直接取文件，
    脚本**不会**自动编译）。且它与 App 内现役那份**不是同一个**：仓库 33000 字节未签名 /
-   App 内 51600 字节已签名（都是 v14）。判据是 `shim-status` 报"补丁库在位"+ 会话真出帧，**不是字节数**。
+   App 内 51600 字节已签名（都是 v14）。判据是 `uu.sh status` 报"补丁库在位"+ 会话真出帧，**不是字节数**。
 5. **`tools/` 8 个文件全留** —— 核心 1（`insert_dylib.py` 插 LC_LOAD_DYLIB）+ 监测 3 + 演练 1 +
    整理 1 + setmode 1 对。删除收益（几十 KB）远小于不确定性。
 6. **`UURemote.entitlements` 必须留** —— `uu.sh:120` 强制要求，找不到直接 `exit 1`；

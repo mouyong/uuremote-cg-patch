@@ -442,7 +442,7 @@ swiftc -O -o tools/setmode tools/setmode.swift
 | 仓库 `shim/libuushim.dylib` | 33000 | 未签名 | 待装源，`uu.sh shim-install` 直接取它 |
 | App 内现役 | 51600 | 已签名 | 装机后经 `uu.sh sign` 重签 + 带 extra-ents |
 
-判据不是字节数，而是 `bash uu.sh shim-status` 报「补丁库在位」且会话真能出帧
+判据不是字节数，而是 `bash uu.sh status` 报「补丁库在位」且会话真能出帧
 （`tail /tmp/uushim.log`）。另：编译产物字节数可复现（33000），但 **md5 每次不同** ——
 Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
 
