@@ -56,9 +56,10 @@ bash uu.sh status         # 项目运行态总览
 2. **feat-107** —— 关 Docker 的 `KubernetesEnabled`（本机 8GB/2 核，1.7GB 是硬成本）。
 3. **feat-105 上游 PR** —— 先确认用户意愿（本机已有可行绕过，此项为消除上游误判）。
 
-**不要做**：`status=blocked` 的项（等用户）；`archive/pre-merge-20260926/`（是回退点，必须留）；
-`archive/20260926-round2/spy/`（被 evidence 引用作证据）；`archive/20260927/tools/`（本次归档的整包路线，可恢复）；
+**不要做**：`status=blocked` 的项（等用户）；
 `libstreamer.dylib.orig` / `orig.version` / `UURemote.entitlements` / `shim/backup/UURemoteServer.orig`（活依赖，删了断链）。
+**已删除的 4 个工具脚本**（免 sudo 整包换位路线 + 重叠的验证脚本）需要时从历史取回：
+`git show bbf6f1d~1:tools/stage-app-bundle.sh > tools/stage-app-bundle.sh`。
 
 ---
 

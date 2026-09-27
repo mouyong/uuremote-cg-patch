@@ -421,8 +421,9 @@ uuremote-cg-patch/
 `libuushim.c` 是唯一真源，任何 dylib 都可由它重新编译。
 
 **整理工具**：`bash uu.sh cleanup`（演练）/ `bash uu.sh cleanup --apply`（执行）。
-只删「垃圾 + 可再生成的构建产物」，其余 mv 到 `archive/`；
-移动前会 grep 全仓引用，被 `.sh`/`.py` 引用的文件一律保留。
+**口径：不搞 `archive/` 目录 —— git 历史就是归档。** 只删两类：
+① 垃圾 / 可再生成的构建产物；② 陈旧产物（**要求 git 已跟踪** —— 删除提交后内容即留在历史里，
+`git show <提交>:<路径>` 可取回）。从未进过 git 的文件不擅自删，只报告。
 
 ### 关键文件
 

@@ -168,7 +168,7 @@
     {
       "id": "feat-111",
       "name": "仓库瘦身：归档从未使用的整套路线 + 刷新过期清单",
-      "description": "把免 sudo「整包换位」装机路线（tools/stage-app-bundle.sh、install-app-bundle.sh、restore-app-bundle.sh）与重叠的 tools/uu-verify-encoder.sh 整组归档；刷新 tools/cleanup.py 的过期清单（原清单里 30+ 条指向早已不存在的文件，导致 `uu.sh cleanup` 永远报「无事可做」）",
+      "description": "把免 sudo「整包换位」装机路线（tools/stage-app-bundle.sh、install-app-bundle.sh、restore-app-bundle.sh）与重叠的 tools/uu-verify-encoder.sh 整组删除（不搞 archive/，靠 git 历史恢复）；刷新 tools/cleanup.py 的过期清单（原清单里 30+ 条指向早已不存在的文件，导致 `uu.sh cleanup` 永远报「无事可做」）",
       "dependencies": [
         "feat-005",
         "feat-006"

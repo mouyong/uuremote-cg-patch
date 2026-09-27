@@ -143,8 +143,8 @@ bash uu.sh watchdog --dry
 - **提交身份统一**：11 个提交改写为 GitHub 的 noreply 身份（不暴露个人邮箱）；
   逐个 tree 哈希核对**只换身份、代码零改动**；留标签 `pre-identity-rewrite` 作退路。
 - **仓库瘦身**：跟踪文件 44→39。删 25MB 可重建产物 + 纯重复 dylib（**先证明可重建**：
-  `patch_tool.py patch` 产出与现有产物逐字节相同）；整组归档从未使用的免 sudo「整包换位」路线
-  + 重叠的验证脚本（`archive/20260927/tools/`）；刷新 `tools/cleanup.py` 的过期清单
+  `patch_tool.py patch` 产出与现有产物逐字节相同）；整组**删除**从未使用的免 sudo「整包换位」路线
+  + 重叠的验证脚本（不搞 archive/，靠 git 历史恢复）；刷新 `tools/cleanup.py` 的过期清单
   （原清单 30+ 条指向早已不存在的文件 → `uu.sh cleanup` 永远报「无事可做」，等于废功能）。
 - 收尾：`./init.sh` 全绿、`./test.sh` PASS、干净克隆里两者同样通过。
 
