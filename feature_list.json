@@ -129,7 +129,7 @@
         "feat-005"
       ],
       "status": "done",
-      "evidence": "删除 4 项释放 25MB（253M→228M）；重建验证：patch_tool.py patch 产出 md5 489f4a89… 与现有产物逐字节相同 → 删了不会自断后路。【有意未删】archive/ 保留 —— 它的 spy/ 被 evidence 引用作证据，pre-merge-20260926/ 是 uu.sh 回退点；清了会断引用链。"
+      "evidence": "删除 4 项释放 25MB（253M→228M）；重建验证：patch_tool.py patch 产出 md5 489f4a89… 与现有产物逐字节相同 → 删了不会自断后路。【archive/ 已清除】内容（72 文件 1.7MB）打包到仓库外 ~/.hermes/backup/uuremote-cg-patch-archive-<时间>.tar.gz 后删除 —— 它含设备 ID/用户名/内网 IP，不适合进 git 历史。"
     },
     {
       "id": "feat-107",
@@ -174,7 +174,7 @@
         "feat-006"
       ],
       "status": "done",
-      "evidence": "跟踪文件 44→39。归档依据：README 从未承认该路线、stage/ 与 app-bundle-backup/ 两个产物目录始终不存在（从未实际使用）、uu.sh 无任何引用；功能已由 uu.sh install/restore 覆盖。归档而非删除（archive/20260927/，可恢复）。cleanup.py 新增「整组归档」概念 —— 互为 bash 调用的脚本逐个查引用会死循环。文档中 6 处命令引用已同步为 uu.sh 等价命令。"
+      "evidence": "跟踪文件 44→39。删除依据：README 从未承认该路线、stage/ 与 app-bundle-backup/ 两个产物目录始终不存在（从未实际使用）、uu.sh 无任何引用；功能已由 uu.sh install/restore 覆盖。**删除而非归档**（用户口径：不搞 archive/，靠 git 历史；这 4 个脚本本就在历史里，`git show bbf6f1d~1:<路径>` 可取回）。cleanup.py 改为「删除」策略并加保护：陈旧产物**必须 git 已跟踪**才删，未跟踪的一律跳过并报告。文档 8 处引用已同步。"
     }
   ]
 }

@@ -147,6 +147,14 @@ bash uu.sh watchdog --dry
   + 重叠的验证脚本（不搞 archive/，靠 git 历史恢复）；刷新 `tools/cleanup.py` 的过期清单
   （原清单 30+ 条指向早已不存在的文件 → `uu.sh cleanup` 永远报「无事可做」，等于废功能）。
 - 收尾：`./init.sh` 全绿、`./test.sh` PASS、干净克隆里两者同样通过。
+- **归档政策改口径（用户指令）**：不再用 `archive/` 目录 —— **恢复靠 git 历史**。
+  · `tools/cleanup.py` 从「移到 archive/」改为「删除」；陈旧产物**必须 git 已跟踪**才删
+    （删完内容仍留在历史里，`git show <提交>:<路径>` 可取回），未跟踪的一律跳过并报告。
+  · 上一轮归档的 4 个脚本（`archive/20260927/tools/`）已删 —— 删前逐个比对 md5 与历史版本一致。
+  · 原 `archive/` 目录（72 文件 / 1.7MB）**清除**：内容打包到**仓库外**
+    `~/.hermes/backup/uuremote-cg-patch-archive-<时间>.tar.gz`（校验过 md5 一致）。
+    不能进 git 历史的原因：里面含**设备 ID、用户名、VPN 内网 IP**（扫描出 190+ 处）。
+  · 文档 8 处引用已同步为「git 历史取回」或「已清除，仅存结论」。
 
 ### 2026-09-26 · 脚本整合 + 放 GitHub
 

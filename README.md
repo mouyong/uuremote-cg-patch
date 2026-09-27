@@ -89,7 +89,7 @@ sudo bash uu.sh install
 | `libstreamer.dylib.patched` | ~25MB | 每次 `install` 由 `patch_tool.py` **自动生成** |
 | `shim/backup/UURemoteServer.orig` | ~24MB | `shim-install` 时**自动备份** |
 | `cert/key.pem`、`cert/id.p12` | 几 KB | **你按第一步自己生成**（私钥不入库） |
-| `archive/`、`*.before-certsign/` | 视情况 | 本地历史与整包快照，不入库 |
+| `*.before-certsign/` | ~177MB | `uu.sh sign` 每次自动重建的前置快照，不入库 |
 
 这些都是网易 UURemote 的原始库文件（含版权）或你的本机私钥，
 随仓库分发既无必要也不合适，所以走了 `.gitignore`。
@@ -407,17 +407,14 @@ uuremote-cg-patch/
 │   └─ backup/UURemoteServer.orig  UURemoteServer 原库（装机/还原的活依赖，别删）
 ├─ tools/                  ← 辅助工具（setmode 分辨率切换 / 监控 / 探针 / 整理）
 ├─ evidence/               ← 根因分析与实测结论（.md）
-├─ archive/<日期>/         ← 归档的历史产物（★ 仅本机保留，.gitignore 已排除，不入库）
 ├─ libstreamer.dylib.orig  ← 官方原库备份（还原靠它，别删）
 └─ libstreamer.dylib.patched
 ```
 
-**从旧脚本回退**（★ 仅本机归档，不入库）：整合前的 9 个脚本完整保留在
-`archive/pre-merge-20260926/`。要回退：`cp archive/pre-merge-20260926/*.sh .`
-（放回顶层即可用；它们靠自身路径定位资源）。
-其中归档的 `uu-cg-patch.sh`（旧版）还支持 `UURT_DIR=<项目目录>` 直接在归档目录里跑。
+**回退**：整合前的 9 个脚本不再保留（其逻辑已逐字并入 `uu.sh`）。
+要撤销补丁用 `sudo bash uu.sh restore`，撤销 shim 用 `sudo bash uu.sh shim-restore`。
 
-**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本在本机 `archive/`（不入库）。
+**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本不再保留（需要时从 git 历史取）。
 `libuushim.c` 是唯一真源，任何 dylib 都可由它重新编译。
 
 **整理工具**：`bash uu.sh cleanup`（演练）/ `bash uu.sh cleanup --apply`（执行）。

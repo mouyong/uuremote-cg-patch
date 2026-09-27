@@ -164,7 +164,7 @@ Before ending a session:
 | 根因与实测结论 | `evidence/*.md` + `README.md` |
 
 **不要删**（活依赖，删了断链）：`libstreamer.dylib.orig`、`orig.version`、`UURemote.entitlements`、
-`shim/backup/UURemoteServer.orig`、`archive/pre-merge-20260926/`（`uu.sh` 的回退点）。
+`shim/backup/UURemoteServer.orig`。
 
 ## 本机环境前提（改动前要知道）
 

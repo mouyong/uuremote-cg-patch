@@ -55,15 +55,12 @@ sudo bash uu.sh shim-restore    # 还原
 **对比现状**：三处补丁装好、无画面时，UU 自己连着就烧 **~115%**（反复重试）。
 → A 方案 CPU **不增反降**，且终于有画面。限帧率（如 5 FPS）还可再降。
 
-## 用法（本机验证工具，★ 未随仓库分发）
-`harness` 用来验证 shim 是否真出帧。它只放在**本机归档**里
-（`archive/` 已被 `.gitignore` 排除，克隆下来不会有这个目录）：
+## 怎么验证（`harness` 实验程序已不保留）
+当初用独立 `harness` 程序做过对照实验（注入出帧 vs 不注入全黑）。现在不做这种
+底层对照了 —— 直接跑端到端验收即可：
 ```bash
-cd archive/20260926-round2/shim-experiments        # 本机归档路径
-# 对照（无帧）
-./harness
-# 注入 shim（出帧）
-DYLD_INSERT_LIBRARIES=$PWD/uushim.dylib ./harness
+./test.sh              # 真连一次，断言出帧增长 + 画面非黑 + 无异常
+bash uu.sh verify      # 查日志，看 UU 实际走了哪套采集器
 ```
 
 ## 装进 UU 的前提（尚未执行）
