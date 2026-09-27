@@ -183,17 +183,17 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   # ★ 按**内容**判定，不按扩展名：公开证书（cert.pem 是 BEGIN CERTIFICATE）可以入库，
   #   扩展名匹配会把它误报成私钥（实测踩过）。内容匹配同时能抓住「改了名的私钥」。
   LEAK=""
-  for f in $(git ls-files); do
-    case "$f" in
-      *.p12|*.pfx|*.key) LEAK="$LEAK $f"; continue ;;
+  # ★ 用 -z 读文件名：git 默认把非 ASCII 名转义成 \346\240... 形式，
+  #   用 $(git ls-files) 遍历会**静默跳过所有中文名文件**
+  #   （实测：44 个跟踪文件里实际只扫到 37 个）。门禁漏扫比没有门禁更危险。
+  while IFS= read -r -d '' f; do
+    [ -f "${f}" ] || continue
+    case "${f}" in
+      *.p12|*.pfx|*.key) LEAK="${LEAK} ${f}"; continue ;;
     esac
-    # 只看可能是密钥/证书的文本文件，避免遍历所有源码
-    case "$f" in
-      *.pem|*.crt|*.cer|*.key|*.txt|*.json|*id_rsa*|*id_ed25519*)
-        if grep -qE 'BEGIN [A-Z ]*PRIVATE KEY' "$f" 2>/dev/null; then LEAK="$LEAK $f"; fi
-        ;;
-    esac
-  done
+    # 按**内容**判定，不设扩展名白名单 —— 否则「私钥被贴进 README/.sh/.md」会漏网
+    if grep -qE 'BEGIN [A-Z ]*PRIVATE KEY' "${f}" 2>/dev/null; then LEAK="${LEAK} ${f}"; fi
+  done < <(git ls-files -z)
   if [ -n "$LEAK" ]; then
     bad "版本库里跟踪了私钥：${LEAK}（违反铁律，见 AGENTS.md）"
   else

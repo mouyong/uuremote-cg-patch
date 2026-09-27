@@ -407,16 +407,17 @@ uuremote-cg-patch/
 │   └─ backup/UURemoteServer.orig  UURemoteServer 原库（装机/还原的活依赖，别删）
 ├─ tools/                  ← 辅助工具（setmode 分辨率切换 / 监控 / 探针 / 整理）
 ├─ evidence/               ← 根因分析与实测结论（.md）
-├─ archive/<日期>/         ← 归档的历史产物（含整合前的旧脚本，可随时取回）
+├─ archive/<日期>/         ← 归档的历史产物（★ 仅本机保留，.gitignore 已排除，不入库）
 ├─ libstreamer.dylib.orig  ← 官方原库备份（还原靠它，别删）
 └─ libstreamer.dylib.patched
 ```
 
-**从旧脚本回退**：整合前的 9 个脚本完整保留在 `archive/pre-merge-20260926/`。
-要回退：`cp archive/pre-merge-20260926/*.sh .`（放回顶层即可用；它们靠自身路径定位资源）。
+**从旧脚本回退**（★ 仅本机归档，不入库）：整合前的 9 个脚本完整保留在
+`archive/pre-merge-20260926/`。要回退：`cp archive/pre-merge-20260926/*.sh .`
+（放回顶层即可用；它们靠自身路径定位资源）。
 其中归档的 `uu-cg-patch.sh`（旧版）还支持 `UURT_DIR=<项目目录>` 直接在归档目录里跑。
 
-**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本在 `archive/`。
+**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本在本机 `archive/`（不入库）。
 `libuushim.c` 是唯一真源，任何 dylib 都可由它重新编译。
 
 **整理工具**：`bash uu.sh cleanup`（演练）/ `bash uu.sh cleanup --apply`（执行）。

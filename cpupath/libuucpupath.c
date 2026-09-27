@@ -18,8 +18,11 @@
 //
 // 编译：clang -dynamiclib -O2 -o libuucpupath.dylib libuucpupath.c \
 //         -framework CoreVideo -framework CoreFoundation -framework IOSurface
-// 注入：launchctl setenv DYLD_INSERT_LIBRARIES <绝对路径> 后重启 UU
-//       持久化见同目录 install.sh / uninstall.sh
+// 注入：把 DYLD_INSERT_LIBRARIES 写进 UU 自己的 LaunchAgent plist 的
+//       EnvironmentVariables（见同目录 install.sh / uninstall.sh）。
+//       ★ 绝不用 `launchctl setenv` —— 那是 launchd 用户域全局变量，
+//         会让系统守护进程与 pgrep/screencapture 也加载本未签名库，
+//         被 macOS 的 CODESIGNING 保护直接 SIGKILL（实测一天 141 份崩溃报告）。
 
 #include <stdio.h>
 #include <stdlib.h>

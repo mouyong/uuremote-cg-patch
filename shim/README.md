@@ -29,7 +29,7 @@ sudo bash uu.sh shim-restore    # 还原
 
 ## 验证结果（本机 2011 Mac mini / macOS 15.7.9 / 无 IOGPU 无 Metal）
 
-**harness 严格验证（测试程序未随仓库保留，同源 harness 见 `archive/20260926-round2/shim-experiments/`；三种请求格式各 3 秒）**
+**harness 严格验证（测试程序未随仓库分发；三种请求格式各 3 秒）**
 | 请求格式 | 完整帧 | 空脏矩形 | 平均亮度 | 结论 |
 |---|---|---|---|---|
 | BGRA | 14 | 0 | 131.6 | ✔ 通过 |
@@ -55,9 +55,11 @@ sudo bash uu.sh shim-restore    # 还原
 **对比现状**：三处补丁装好、无画面时，UU 自己连着就烧 **~115%**（反复重试）。
 → A 方案 CPU **不增反降**，且终于有画面。限帧率（如 5 FPS）还可再降。
 
-## 用法（harness 与其 dylib 已归档到 `archive/20260926-round2/shim-experiments/`）
+## 用法（本机验证工具，★ 未随仓库分发）
+`harness` 用来验证 shim 是否真出帧。它只放在**本机归档**里
+（`archive/` 已被 `.gitignore` 排除，克隆下来不会有这个目录）：
 ```bash
-cd archive/20260926-round2/shim-experiments
+cd archive/20260926-round2/shim-experiments        # 本机归档路径
 # 对照（无帧）
 ./harness
 # 注入 shim（出帧）
