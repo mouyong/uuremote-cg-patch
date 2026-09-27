@@ -12,7 +12,7 @@
 
 Before writing code:
 
-1. `pwd` 确认在 `~/.hermes/uuremote-cg-patch`
+1. `pwd` 确认在**本项目根目录** —— 所有脚本按自身位置定位，clone 到任何路径都能跑
 2. 读完本文件（尤其下面「铁律」一节）
 3. 跑 **`./init.sh`** 验证环境与运行态
 4. `skill_view('macos-remote-access')` —— 不读极易重踩已记录的坑

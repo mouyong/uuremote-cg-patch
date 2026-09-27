@@ -18,17 +18,18 @@
 
 ## 一键安装 / 还原（推荐路径）
 ```bash
-sudo bash ~/.hermes/uuremote-cg-patch/uu-shim-install.sh    # 安装
-sudo bash ~/.hermes/uuremote-cg-patch/uu-shim-restore.sh    # 还原
+cd <本项目根目录>
+sudo bash uu.sh shim-install    # 安装
+sudo bash uu.sh shim-restore    # 还原
 ```
 安装脚本会：部署 `libuushim.dylib` → 给 `UURemoteServer` 加一条 `LC_LOAD_DYLIB`
 （**不改任何机器码**）→ 用同一张证书重签整包（UURemoteServer 额外带
 `disable-library-validation`）。
-> 依赖前提：先用 `uu-cg-patch.sh install` 装好三处补丁。本方案是它的补充，不是替代。
+> 依赖前提：先用 `sudo bash uu.sh cg-install` 装好三处补丁（旧脚本 `uu-cg-patch.sh` 已并入 `uu.sh`）。本方案是它的补充，不是替代。
 
 ## 验证结果（本机 2011 Mac mini / macOS 15.7.9 / 无 IOGPU 无 Metal）
 
-**harness 严格验证（`harness2.c`，三种请求格式各 3 秒）**
+**harness 严格验证（测试程序未随仓库保留，同源 harness 见 `archive/20260926-round2/shim-experiments/`；三种请求格式各 3 秒）**
 | 请求格式 | 完整帧 | 空脏矩形 | 平均亮度 | 结论 |
 |---|---|---|---|---|
 | BGRA | 14 | 0 | 131.6 | ✔ 通过 |
@@ -54,8 +55,9 @@ sudo bash ~/.hermes/uuremote-cg-patch/uu-shim-restore.sh    # 还原
 **对比现状**：三处补丁装好、无画面时，UU 自己连着就烧 **~115%**（反复重试）。
 → A 方案 CPU **不增反降**，且终于有画面。限帧率（如 5 FPS）还可再降。
 
-## 用法
+## 用法（harness 与其 dylib 已归档到 `archive/20260926-round2/shim-experiments/`）
 ```bash
+cd archive/20260926-round2/shim-experiments
 # 对照（无帧）
 ./harness
 # 注入 shim（出帧）

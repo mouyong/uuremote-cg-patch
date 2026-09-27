@@ -12,7 +12,7 @@
 ## ★ 交接前必做（新会话第一件事）
 
 ```bash
-cd ~/.hermes/uuremote-cg-patch
+cd <本项目根目录>          # 脚本自定位，clone 到任何路径都能跑
 ./init.sh                 # 环境 + 运行态 + 状态文件 + git 全量自检
 bash uu.sh status         # 项目运行态总览
 ```

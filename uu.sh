@@ -1776,7 +1776,7 @@ UU远程 修复工具集 —— 单文件入口
   monitor             实时看 CPU 与帧率
   traffic             看上行走哪条网卡 / 码率 / 中继
   encoder             编码器能力实测（确认有没有硬件编码）
-  setmode [模式]      查看/切换分辨率（setmode list / 720p / 900p / 1080p）—— 提帧率最有效
+  setmode [模式]      查看/切换显示模式（setmode list / 720p / 900p / 1080p）—— 实测不改帧率，码流尺寸由 UU 定
   cleanup             项目清理（演练；--apply 实做）
 
 【其他】
@@ -1786,7 +1786,7 @@ UU远程 修复工具集 —— 单文件入口
   连不上 / 黑屏     → sudo bash uu.sh reset      （必要时再 daemon）
   设备不上线/1001    → sudo bash uu.sh sign  然后  sudo bash uu.sh daemon
   UU 更新后补丁没了  → sudo bash uu.sh install
-  帧率低             → bash uu.sh status 看 Docker；再 setmode 降到 720p
+  帧率低             → bash uu.sh status 看 Docker 与内存；瓶颈是软件编码（详见 README）
 
 背景：本机缺 IOGPU，ScreenCaptureKit 必然失败(-3802) → 纯黑屏。UU 自带
       CoreGraphics 采集器但工厂函数永远选不到，故需打补丁。详见 README.md。
