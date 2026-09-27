@@ -25,11 +25,20 @@ warn() { echo "[WARN] $*"; }
 # ---------- ① 项目文件完整 ----------
 echo "=== ① 项目文件完整性（缺一即断引用链）==="
 for f in uu.sh patch_tool.py \
-         libstreamer.dylib.orig orig.version UURemote.entitlements \
-         shim/libuushim.c shim/libuushim.dylib shim/backup/UURemoteServer.orig \
+         orig.version UURemote.entitlements \
+         shim/libuushim.c shim/libuushim.dylib \
          cpupath/libuucpupath.c cpupath/install.sh cpupath/uninstall.sh cpupath/status.sh \
          tools/setmode README.md test.sh; do
-  if [ -e "$f" ]; then ok "$f"; else bad "$f 缺失"; fi
+  if [ -e "${f}" ]; then ok "${f}"; else bad "${f} 缺失"; fi
+done
+# 原厂二进制备份：体积大且属第三方，**按设计不入仓库** → 首次 install / shim-install
+# 会自动从官方 App 重建。故新克隆里没有它们是正常现象，不是缺陷（判 FAIL 会误报）。
+for f in libstreamer.dylib.orig shim/backup/UURemoteServer.orig; do
+  if [ -e "${f}" ]; then
+    ok "${f}"
+  else
+    warn "${f} 尚不存在（原厂备份，按设计不入仓库；首次 install / shim-install 自动生成）"
+  fi
 done
 # 证书（私钥不入 git，但本机必须存在）
 for f in cert/cert.pem cert/key.pem cert/openssl.cnf; do
