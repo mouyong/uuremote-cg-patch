@@ -21,16 +21,22 @@
 #   ./test.sh --local-only     # 不依赖外部控制器，只做本机静态+日志断言
 #
 # 可用环境变量覆盖：
-#   UU_TEST_HOST   控制器 SSH 目标（默认 mouyong@<VPN_IP>）
-#   UU_TEST_DEVICE 被控端设备 ID（默认本项目一直在用的那台）
+#   UU_TEST_HOST   控制器 SSH 目标（形如 user@host；不设则跳过端到端）
+#   UU_TEST_DEVICE 被控端设备 ID
 #   UU_TEST_SECS   观测窗口秒数（默认 20）
 set -u
 
 BASE="$(cd "$(dirname "$0")" && pwd)"
 cd "$BASE"
 
-HOST="${UU_TEST_HOST:-mouyong@<VPN_IP>}"
-DEV="${UU_TEST_DEVICE:-aeawuyzhiea53dk2}"
+# ★ 真实取值放在 .uutest.local（已 gitignore，不随仓库分发；实际信息不进 git 历史）。
+#   内容形如：  UU_TEST_HOST='<你的控制器 SSH 目标>'
+#              UU_TEST_DEVICE='<被控端设备 ID>'
+#   也可不改文件、直接用环境变量传入。
+[ -f "${BASE}/.uutest.local" ] && . "${BASE}/.uutest.local"
+
+HOST="${UU_TEST_HOST:-}"
+DEV="${UU_TEST_DEVICE:-}"
 SECS="${UU_TEST_SECS:-20}"
 CLI="/Applications/UURemote.app/Contents/Helpers/uuyc-cli"
 SHIM_LOG="${UU_SHIM_LOG:-/tmp/uushim.log}"
@@ -102,6 +108,15 @@ if [ "$LOCAL_ONLY" = "1" ]; then
   echo "--- --local-only：跳过端到端 ---"
   [ "$fail" = "0" ] && echo "结果: PASS（仅静态断言）" || echo "结果: FAIL"
   exit "$fail"
+fi
+
+# ---------- ③ 配置闸：没配控制器就跳过端到端 ----------
+if [ -z "${HOST}" ] || [ -z "${DEV}" ]; then
+  skip "未配置控制器（.uutest.local 里的 UU_TEST_HOST / UU_TEST_DEVICE，或同名环境变量）"
+  skip "→ 跳过端到端断言；静态断言结果见上"
+  echo
+  [ "${fail}" = "0" ] && echo "结果: PASS（仅静态断言）" || echo "结果: FAIL（静态断言未过）"
+  exit "${fail}"
 fi
 
 # ---------- ③ 控制器可达性 ----------

@@ -92,7 +92,7 @@
     {
       "id": "feat-104",
       "name": "推送仓库到远端",
-      "description": "目前无 git remote。需定：推到哪个账号/仓库、用哪个提交身份（现为 my24251325@gmail.com，已进本地历史）",
+      "description": "目前无 git remote。需定：推到哪个账号/仓库、用哪个提交身份（本机提交身份目前是占位值，推远端前需确认）",
       "dependencies": ["feat-006"],
       "status": "blocked",
       "evidence": "仓库已就绪（4 个提交、工作区干净、0 私钥）。阻塞：等用户定账号与身份"
