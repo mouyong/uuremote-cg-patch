@@ -92,6 +92,14 @@ enum { FK_BGRA = 1, FK_NV12 = 2, FK_OTHER = 0 };
 static FILE *g_log;
 static pthread_mutex_t g_loglock = PTHREAD_MUTEX_INITIALIZER;
 
+// ★ v17：画面导出（仅调试用）。设 UUSHIM_DUMP=/tmp/uu-frame 后，把渲染出的 BGRA 画面
+//   写成 BMP（限 3 张），用来人工核对「shim 抓到的到底是不是真实桌面」。
+//   为什么关键：『连上没画面』可能是①采集侧抓到黑帧/花屏，②传输侧没送出去，③客户端渲染
+//   问题。看一张导出的图就能排除①，剩下范围立刻缩小 —— 这正是这次排查缺的证据。
+//   声明放这里是为了构造函数也能读到它（C 里先声明后使用）。
+static const char *g_dump_path;
+static volatile int g_dump_n;
+
 static void ulog(const char *fmt, ...) {
     char buf[640];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
@@ -113,7 +121,8 @@ static void ulog(const char *fmt, ...) {
 }
 
 __attribute__((constructor)) static void uushim_init(void) {
-    ulog("=== libuushim v16 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】+ **v16 修两处真泄漏：让出槽位/超时回收时只摘映射不释放缓冲（每处漏 ~28MB 显存，256MB 显存泄漏约 9 次即耗尽 → 新连接拿不到缓冲 → 黑屏），并加缓冲记账供机器核对**；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
+    g_dump_path = getenv("UUSHIM_DUMP");   // ★ v17 调试：非空则把抓到的画面导出 BMP
+    ulog("=== libuushim v17 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】+ v16 修两处真泄漏（让出槽位/超时回收只摘映射不释放缓冲，每处 ~28MB 显存）并加缓冲记账 + **v17 加 UUSHIM_DUMP 画面导出（人工核对「抓到的画面对不对」——这是判断「连上没画面」是采集侧还是传输侧的关键证据）**；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +191,46 @@ static double shim_mb(const Shim *s) {
 static void bufs_account(const char *why) {
     ulog("缓冲记账[%s]：活跃 %ld 会话 / 约 %.1f MB（不随连接次数增长才正常）",
          why, g_live_buf_sessions, (double)g_live_buf_bytes / (1024.0 * 1024.0));
+}
+
+// ---------------------------------------------------------------------------
+// ★ v17：调试用画面导出。把当前渲染出的 BGRA 缓冲写成 BMP（24 位、自底向上）。
+//   故意不引任何第三方库、不依赖 CGImage 导出（那需要额外 API 且易失败），
+//   直接把内存按 BMP 规范落盘 —— 这样即使上层画面链路有问题，这份图也一定拿得到。
+//   用途：一眼判定「连上没画面」到底是①采集侧抓到黑帧/花屏，还是②传输/客户端问题。
+//   安全性：只在采集线程里、只写前 3 张、路径来自环境变量（本地调试用）。
+static void dump_frame_bmp(const Shim *s, const char *path) {
+    if (!s || !s->buf || !s->w || !s->h) return;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint32_t w = (uint32_t)s->w, h = (uint32_t)s->h;
+    uint32_t rowsz = w * 3;
+    uint32_t pad = (4 - (rowsz % 4)) % 4;
+    uint32_t imgsz = (rowsz + pad) * h;
+    uint32_t fsz = 54 + imgsz, off = 54, ihsz = 40;
+    uint16_t planes = 1, bpp = 24;
+    uint8_t hdr[54];
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = 'B'; hdr[1] = 'M';
+    memcpy(hdr + 2, &fsz, 4);   memcpy(hdr + 10, &off, 4);
+    memcpy(hdr + 14, &ihsz, 4); memcpy(hdr + 18, &w, 4);
+    memcpy(hdr + 22, &h, 4);    memcpy(hdr + 26, &planes, 2);
+    memcpy(hdr + 28, &bpp, 2);  memcpy(hdr + 34, &imgsz, 4);
+    fwrite(hdr, 1, sizeof hdr, f);
+    size_t stride = rowsz + pad;
+    uint8_t *row = calloc(1, stride);
+    if (!row) { fclose(f); return; }
+    for (int y = (int)h - 1; y >= 0; y--) {          // BMP 自底向上
+        const uint8_t *src = s->buf + (size_t)y * w * 4;
+        for (uint32_t x = 0; x < w; x++) {           // BGRA → BGR
+            row[x * 3 + 0] = src[x * 4 + 0];
+            row[x * 3 + 1] = src[x * 4 + 1];
+            row[x * 3 + 2] = src[x * 4 + 2];
+        }
+        fwrite(row, 1, stride, f);
+    }
+    free(row);
+    fclose(f);
 }
 static Shim *g_shim[MAXS];
 static CFTypeRef g_handle[MAXS];
@@ -366,6 +415,13 @@ static void *worker(void *arg) {
             long sm = 0, n = 0;
             for (size_t p = 0; p < s->w * s->h; p += 6400) { sm += s->buf[p * 4 + 1]; n++; }
             last_lum = n ? (double)sm / n : 0;
+        }
+        // ★ v17：按需导出画面（人工核对采集侧是否正确）。只导出前 3 张，避免占盘。
+        if (g_dump_path && *g_dump_path && g_dump_n < 3) {
+            char dp[400];
+            snprintf(dp, sizeof dp, "%s-%d.bmp", g_dump_path, g_dump_n++);
+            dump_frame_bmp(s, dp);
+            ulog("画面已导出 → %s（用来看 shim 抓到的画面是否为真实桌面）", dp);
         }
         if (s->handler) {
             uint64_t dt = mach_absolute_time();
@@ -767,6 +823,8 @@ static int32_t my_start(CGDisplayStreamRef ref) {
         return -1;
     }
     if (!s->started) {
+        g_dump_n = 0;   // ★ 每次新会话重置导出计数：保证「每次连接都能抓到当前画面」，
+                        //   否则只导出进程生命周期内最早那 3 帧，事后取证全失效。
         s->running = 1; s->started = 1;
         if (pthread_create(&s->thr, NULL, worker, s) != 0) { s->running = 0; return -1; }
         ulog("start → 截图轮询线程已启动（目标 %d FPS）", UUSHIM_TARGET_FPS);
