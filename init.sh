@@ -52,6 +52,29 @@ for s in uu.sh init.sh; do
   [ -f "$s" ] || continue
   if bash -n "$s" 2>/dev/null; then ok "bash -n $s"; else bad "bash -n $s 语法错误"; fi
 done
+# ★ 铁律 12 的机器化：`$var` 后紧跟全角标点会被并进变量名（`set -u` 下直接中止，
+#   而且崩在**报错信息那一行** —— 最需要它说话的时候）。
+#   铁律写在 AGENTS.md 里仍被连续违反两次，所以改成自动检查，不再靠记性。
+PUNCT_HIT="$(python3 - <<'PYEOF' 2>/dev/null
+import re, glob
+punct = '（）：，。、「」；？！'
+pat = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)([' + re.escape(punct) + r'])')
+hits = []
+for f in sorted(glob.glob('*.sh')):
+    for i, line in enumerate(open(f, encoding='utf-8', errors='replace').read().splitlines(), 1):
+        if line.lstrip().startswith('#'):
+            continue
+        for m in pat.finditer(line):
+            hits.append(f'{f}:{i}  ${m.group(1)}{m.group(2)}')
+print('\n'.join(hits))
+PYEOF
+)"
+if [ -z "$PUNCT_HIT" ]; then
+  ok "全角标点紧跟变量：0 处（铁律 12）"
+else
+  bad "全角标点紧跟变量（铁律 12）—— 一律写成 \${VAR} 形式："
+  echo "$PUNCT_HIT" | sed 's/^/       /'
+fi
 # ★ 用内存里 compile() 而不是 py_compile：py_compile 会写出 __pycache__/*.pyc，
 #   等于「自检自己制造垃圾」（清理清单里正有 __pycache__，形成清了又生的循环）。
 for p in patch_tool.py tools/cleanup.py tools/insert_dylib.py; do
