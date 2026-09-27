@@ -45,7 +45,7 @@
       "description": "原 9 个脚本逐字并入 uu.sh（19 子命令），旧脚本归档可回退",
       "dependencies": [],
       "status": "done",
-      "evidence": "bash -n 通过、结构自检 0 问题、只读子命令实测通过；回退点 archive/pre-merge-20260926/"
+      "evidence": "bash -n 通过、结构自检 0 问题、只读子命令实测通过；当时把 9 个旧脚本归档作回退点（该归档目录后按「不搞 archive/」口径清除，撤销补丁改走 uu.sh restore / shim-restore）"
     },
     {
       "id": "feat-006",
@@ -101,7 +101,7 @@
       "description": "删除 177MB 的 UURemote.app.before-certsign（项目体积的 78%）。★ 已查明它是 uu.sh sign 第 2/9 步「备份当前 App（可回退）」自动创建的：每次签名都 rm -rf 后 ditto 重建 → **可重建**，删除不会破坏任何流程。窗口期风险仅「这次签名前没有快照可回退」；且官方 App 可重新下载恢复。",
       "dependencies": [],
       "status": "blocked",
-      "evidence": "属主 root:wheel → 助手的 rm -rf 命中用户红线（不绕过，交用户执行）。唯一引用点是 uu.sh:878，且为「先删再建」的写法。命令：sudo rm -rf /Users/<user>/.hermes/uuremote-cg-patch/UURemote.app.before-certsign"
+      "evidence": "属主 root:wheel → 助手的 rm -rf 命中用户红线（不绕过，交用户执行）。唯一引用点是 uu.sh:878，且为「先删再建」的写法。命令：sudo rm -rf <项目根>/UURemote.app.before-certsign"
     },
     {
       "id": "feat-104",
