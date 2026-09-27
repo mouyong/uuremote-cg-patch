@@ -2,7 +2,7 @@
 
 让**没有 Metal 的老 Mac**（AMD pre-GCN，如 2011 Mac mini `Macmini5,2`）能用 UU 远程正常出画面。
 
-- 唯一入口：**`uu.sh`**（19 个子命令，`bash uu.sh help`）
+- 唯一入口：**`uu.sh`**（22 个子命令，`bash uu.sh help`）
 - 深水区技术手册：**`README.md`**（根因、四类 bug 的查证过程、目录结构）
 - 所有踩坑结论沉淀在技能 **`macos-remote-access`** —— 改动前必须 `skill_view` 读它
 

@@ -127,6 +127,34 @@ bash uu.sh watchdog --dry
 
 ## 历史会话（追加式，倒序）
 
+### 2026-09-27 · 清理 177MB 快照（227M → 50M）+ 空 deny 的实测结论
+
+**① 删掉 `UURemote.app.before-certsign`（177MB）** —— 项目体积 **227M → 50M**。
+删前复核两点（都不成立才敢删）：
+- 唯一引用点是 `uu.sh:878`，写法是「先 `rm -rf` 再 `ditto` 重建」→ **只写不读**，从不作为输入；
+- 该处失败提示原文写着「备份失败（继续；**原始库备份仍可还原补丁**）」→ 说明它**不是还原路径**，
+  真正的还原源是 `shim/backup/UURemoteServer.orig` + `libstreamer.dylib.orig`。
+
+剩余 50M 全为活依赖：`libstreamer.dylib.orig`(25M) + `shim/backup/UURemoteServer.orig`(24M) + `.git`(892K)。
+`tools/cleanup.py` 演练报「合计释放 0B」—— 说明此前几轮瘦身已把可清的清干净了。
+
+**② 空 deny 的实测结论（`approvals.deny: []`）** —— 应要求清空了 35 条规则（原话：老是拦掉执行命令）。
+实测清空后：
+
+| 仍拦住（**内置 hardline，删不掉**） | 已完全失守 |
+|---|---|
+| `rm -rf /`、`rm -rf /*`、`shutdown`、`reboot` | `sudo rm -rf <任意路径>`、抹盘、`dd` 写裸设备、`docker prune`、强推… |
+
+📌 **安全态势已变，后续会话必须知道**：本机 sudo 免密 + deny 已空 = agent 可 `sudo rm -rf /Users/<user>`
+而**无任何拦截**。规则留存于 `~/.hermes/deny-rules-retired.yaml`（35 条），
+配置备份 `~/.hermes/config.yaml.bak-20260927-190435`，一行可还原。
+
+（顺带说明：此前"老是拦掉执行命令"的根因是**前导 `*` 写法**的旧规则把只读检索/提交信息一起拦了，
+那部分已单独修好；与之无关的 35 条 `mode: off` 场景本不拦截。）
+
+**同一会话前半段**（详见上一条）：cpupath 三件套并入 `uu.sh`、删 v13、修 `shim-restore` 覆盖顺序缺陷。
+
+
 ### 2026-09-27 · cpupath 并入 uu.sh + 删 v13 + 修 shim-restore 覆盖顺序
 
 **用户提的六个问题逐条查证后处理**（含两个"你的前提其实不成立"的更正）：

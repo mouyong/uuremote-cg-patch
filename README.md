@@ -89,7 +89,7 @@ sudo bash uu.sh install
 | `libstreamer.dylib.patched` | ~25MB | 每次 `install` 由 `patch_tool.py` **自动生成** |
 | `shim/backup/UURemoteServer.orig` | ~24MB | `shim-install` 时**自动备份** |
 | `cert/key.pem`、`cert/id.p12` | 几 KB | **你按第一步自己生成**（私钥不入库） |
-| `*.before-certsign/` | ~177MB | `uu.sh sign` 每次自动重建的前置快照，不入库 |
+| `*.before-certsign/` | ~177MB | `uu.sh sign` 每次自动重建的前置快照。**工作区已清空**（227M→50M），下次 `sign` 会重建 |
 
 这些都是网易 UURemote 的原始库文件（含版权）或你的本机私钥，
 随仓库分发既无必要也不合适，所以走了 `.gitignore`。
@@ -393,7 +393,7 @@ UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 \
 
 ```
 uuremote-cg-patch/
-├─ uu.sh                   ← ★ 唯一入口（19 个子命令：install/restore/status/verify/
+├─ uu.sh                   ← ★ 唯一入口（22 个子命令：install/restore/status/verify/
 │                            cg-install/cg-restore/shim-install/shim-restore/sign/
 │                            daemon/reset/watchdog/watchdog-loop/watchdog-stop/
 │                            monitor/traffic/encoder/setmode/cleanup/help）
@@ -458,7 +458,7 @@ Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
 
 | 文件 | 说明 |
 |---|---|
-| `uu.sh` | **唯一入口**：19 个子命令（`help` 看全部）。原 9 个脚本的逻辑逐字并入，未重写 |
+| `uu.sh` | **唯一入口**：22 个子命令（`help` 看全部）。原 12 个脚本的逻辑逐字并入，未重写 |
 | `patch_tool.py` | **版本自适应定位/打补丁/反推官方库** |
 | `cert/` | 自签证书（`cert.pem` / `key.pem` / `id.p12` / `openssl.cnf`） |
 | `libstreamer.dylib.orig` | **官方原库备份**（还原靠它，别删！） |

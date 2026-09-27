@@ -25,10 +25,28 @@ bash uu.sh status         # 项目运行态总览
 
 | 项 | 状态 |
 |---|---|
-| git | 分支 main、工作区干净、0 私钥、12 个提交、身份统一为 `mouyong <…@users.noreply.github.com>` |
-| 项目体积 | 228MB（其中 177MB 是待删的 `UURemote.app.before-certsign`，删掉即 ~51MB） |
-| 跟踪文件 | 39 个（本次瘦身 44→39） |
+| git | 分支 main、工作区干净、0 私钥、**19 个提交**、身份统一为 `mouyong <…@users.noreply.github.com>` |
+| 远端 | `git@github.com:mouyong/uuremote-cg-patch.git`（public），本地与远端同步 |
+| 项目体积 | **50MB**（177MB 的 `UURemote.app.before-certsign` 已删：227M → 50M） |
+| 体积构成 | 全为活依赖：`libstreamer.dylib.orig` 25M + `shim/backup/UURemoteServer.orig` 24M + `.git` 892K |
+| 跟踪文件 | 35 个 |
 | 相关技能 | `macos-remote-access`（本项目的全部踩坑记录都在这里） |
+
+---
+
+## ⚠️ 安全态势（已变更，务必先读）
+
+**`approvals.deny` 已被清空（`approvals.deny: []`）** —— 应要求（原话：老是拦掉执行命令）。实测清空后：
+
+| 仍拦住（**内置 hardline，删不掉**） | 已完全失守 |
+|---|---|
+| `rm -rf /`、`rm -rf /*`、`shutdown`、`reboot` | `sudo rm -rf <任意路径>`、抹盘、`dd` 写裸设备、`docker prune`、强推、`find -delete` |
+
+⇒ **本机 sudo 免密 + deny 已空 = agent 可以 `sudo rm -rf /Users/<user>` 而没有任何拦截。**
+
+- 退役的 35 条规则留存于 **`~/.hermes/deny-rules-retired.yaml`**（一行可还原）
+- 配置备份：`~/.hermes/config.yaml.bak-20260927-190435`
+- ⇒ 涉及**删除/覆盖不可逆数据**时，即便工具不拦，也要按本项目铁律先备份 + 留回退点，并确认内容已在 git 历史里
 
 ---
 
@@ -37,10 +55,14 @@ bash uu.sh status         # 项目运行态总览
 | # | 卡点 | 需要用户做什么 |
 |---|---|---|
 | B1 | **「无法连接至服务器」客户端侧定位** | 告知：哪个设备报的错 / 现在是否仍报 / 最好给截图。108 侧已实测连通，问题在客户端侧 |
-| B2 | **删 177MB `UURemote.app.before-certsign`** | 属主 root:wheel，`sudo rm -rf` 命中用户红线 → 需用户执行。**已查明它可重建**（`uu.sh sign` 第 2 步每次签名都会 rm -rf 后 ditto 重建），删了不影响任何流程 → `sudo rm -rf <项目根>/UURemote.app.before-certsign`（删掉后项目体积 228MB→51MB） |
-| B3 | **推送到远端** | ① 定仓库名（已建议 `mouyong/uuremote-cg-patch`，账号下未占用）；<br>② 定**公开还是私有** —— README 教用户用网易 TeamID 签自签证书以通过 UU 内部校验，公开可能招法务；<br>③ 定是否加 LICENSE / 免责声明。<br>提交身份已统一（noreply），代码侧无需再改 |
-| B4 | **「允许在后台」显示名** | 选：A 只改看门狗 / B 4 个全改（界面显示脚本名而非 bash）/ C 不改 |
-| B5 | **重启机器一次** | 需在合适时机执行：可清 swap 历史脏页、清 BTM 失效登记、清撤销全局注入前遗留的库加载 |
+| B2 | **「允许在后台」显示名** | 选：A 只改看门狗 / B 4 个全改（界面显示脚本名而非 bash）/ C 不改 |
+| B3 | **重启机器一次** | 需在合适时机执行：可清 swap 历史脏页、清 BTM 失效登记、清撤销全局注入前遗留的库加载 |
+| B4 | **是否补回几条「灾难性底线」deny 规则** | 已答复「清空」，未再追问。若要加回（仅删根/家目录/系统目录那几条）随时可说 —— 日常操作实测不会被它们误伤 |
+
+**已解决（不再阻塞）**：
+- ~~推送到远端~~ → 已推 `mouyong/uuremote-cg-patch`（public）
+- ~~删 177MB 快照~~ → 已删，227M → 50M
+- ~~cpupath 三件套散落~~ → 已并入 `uu.sh`
 
 **另有 1 条已确认不影响功能、等顺手的授权**：归档误留在 `~/Library/LaunchAgents/` 的
 `ai.hermes.gateway.plist.bak-20260905_131611`（`.bak` 结尾不会被加载，也不在后台列表显示）。
@@ -51,15 +73,21 @@ bash uu.sh status         # 项目运行态总览
 
 **Recommended Next Step**: 从 `feature_list.json` 里挑一个 `not-started` 项动手。推荐顺序：
 
-1. **feat-102 `uu.sh reset` 脚枪** —— 唯一还存在的「会误伤用户」缺陷（按 `ps` 的 %cpu 生命周期均值判卡死，
+1. **feat-102 `uu.sh reset` 脚枪** —— 唯一还存在的「会误伤用户」缺陷（按 `ps` 的 `%cpu` 生命周期均值判卡死，
    不看是否在出帧 → 会把正在串流的用户踢下线）。修法：加与看门狗同款「还在出帧就绝不动它」闸 + `--force`。
 2. **feat-107** —— 关 Docker 的 `KubernetesEnabled`（本机 8GB/2 核，1.7GB 是硬成本）。
 3. **feat-105 上游 PR** —— 先确认用户意愿（本机已有可行绕过，此项为消除上游误判）。
 
 **不要做**：`status=blocked` 的项（等用户）；
-`libstreamer.dylib.orig` / `orig.version` / `UURemote.entitlements` / `shim/backup/UURemoteServer.orig`（活依赖，删了断链）。
-**已删除的 4 个工具脚本**（免 sudo 整包换位路线 + 重叠的验证脚本）需要时从历史取回：
-`git show bbf6f1d~1:tools/stage-app-bundle.sh > tools/stage-app-bundle.sh`。
+**不要删**（活依赖，删了断链）：`libstreamer.dylib.orig`、`orig.version`、`UURemote.entitlements`、
+`shim/backup/UURemoteServer.orig`。
+**已删除的文件**（需要时从历史取回；本项目不搞 `archive/`，git 历史就是归档）：
+
+```bash
+git show bbf6f1d~1:tools/stage-app-bundle.sh > tools/stage-app-bundle.sh   # 免 sudo 整包换位路线
+git show f415dbd:shim/libuushim_v13.dylib > /tmp/libuushim_v13.dylib       # shim 上一版（注意：不可重建，只能取回）
+git show 9b8427a:cpupath/install.sh > /tmp/install.sh                      # cpupath 三件套（已并入 uu.sh）
+```
 
 ---
 
@@ -68,19 +96,19 @@ bash uu.sh status         # 项目运行态总览
 | 文件 | 作用 | 注意 |
 |---|---|---|
 | `AGENTS.md` | 本项目的指令与铁律（**开工先读**） | 受保护的 agent 指令文件，改它会被写工具拦截，需走 terminal |
-| `uu.sh` | **唯一入口**，19 个子命令 | 整合自原 9 个脚本，逻辑逐字保留未重写 |
-| `README.md` | 完整技术手册（根因、四个 bug 的查证过程、目录结构、陷阱） | 深水区问题查这里，不要另起文档 |
+| `uu.sh` | **唯一入口**，22 个子命令 | 整合自原 12 个脚本；`install`/`restore` 已补全四道门 |
+| `README.md` | 完整技术手册（根因、四个 bug 的查证过程、目录结构、**重建命令**） | 深水区问题查这里，不要另起文档 |
 | `init.sh` | 启动 / 验证入口（harness 的 verification） | 只读，不改系统状态 |
 | `test.sh` | **端到端验收测试**（本项目没有单元测试框架，此即其「测试」） | 自带安全闸：有人正在用时 SKIP |
 | `feature_list.json` | 工作项状态的唯一事实源 | 同时最多一个 `in-progress` |
 | `progress.md` | 会话连续性日志（倒序追加） | 与 skill 的分工：长期结论进技能，会话轨迹进这里 |
 | `cpupath/libuucpupath.c` | 第 4 道门：CPU 顶替 Metal 帧转换 | ★ 泄漏修复在 `my_CopyTo`：新出口必须 `goto out` |
 | `uu.sh cpupath-install` | 注入安装（写 UU 自己的 plist） | ★ 绝不许退回 `launchctl setenv` |
-| `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 只留现役 `libuushim.dylib`（v14）；v13 已删，需要时从 git 历史取 |
+| `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 只留现役 `libuushim.dylib`（v14）；v13 已删 |
 | `tools/cleanup.py` | 项目整理（`uu.sh cleanup`，默认演练） | 清单易过时：**只列真实存在的项**，改完必跑一次演练核对 |
 | `tools/rehearse.sh` | 改脚本后的演练包装（AGENTS.md 铁律检查项） | 不碰正式 App、不要 sudo；日志落 `shim/rehearsal-*.log` |
 | `libstreamer.dylib.orig` | 官方原库备份 | **`restore` 唯一依赖，别删** |
-| `shim/backup/UURemoteServer.orig` | 被控端原库 | 装机/还原活依赖，别删 |
+| `shim/backup/UURemoteServer.orig` | 被控端原库 | 装机/还原活依赖，别删（`shim-restore` 现在会先校验它是否被污染） |
 | `~/Library/LaunchAgents/com.uuremote-cg-patch.{cpupath,watchdog}.plist` | 持久化两层 | 改完必须 `unload` + `load -w` |
 | `/Library/LaunchAgents/com.netease.uuremote.agent.plist` | cpupath 注入位置（UU 自己的） | ★ UU 升级会覆盖 → 由 cpupath 的复核脚本自动补回 |
 | 日志 | `/tmp/uushim.log`（出帧）、`/tmp/uucpu.log`（CopyTo）、`/tmp/uushim-watchdog.log`（自愈记录）、`UUCpuPath/apply.out.log`（复核） | 排障先看这四个 |

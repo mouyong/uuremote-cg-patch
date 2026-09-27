@@ -42,7 +42,7 @@
     {
       "id": "feat-005",
       "name": "脚本整合为单一入口 uu.sh",
-      "description": "原 9 个脚本逐字并入 uu.sh（19 子命令）；cpupath 三件套当时**未**并入，已于 feat-112 补齐",
+      "description": "原 9 个脚本逐字并入 uu.sh（当时 19 子命令，现 22）；cpupath 三件套当时**未**并入，已于 feat-112 补齐",
       "dependencies": [],
       "status": "done",
       "evidence": "bash -n 通过、结构自检 0 问题、只读子命令实测通过；当时把 9 个旧脚本归档作回退点（该归档目录后按「不搞 archive/」口径清除，撤销补丁改走 uu.sh restore / shim-restore）"
@@ -97,11 +97,11 @@
     },
     {
       "id": "feat-103",
-      "name": "删除 177MB 的 UURemote.app.before-certsign",
+      "name": "删除 177MB 的 UURemote.app.before-certsign（已完成）",
       "description": "删除 177MB 的 UURemote.app.before-certsign（项目体积的 78%）。★ 已查明它是 uu.sh sign 第 2/9 步「备份当前 App（可回退）」自动创建的：每次签名都 rm -rf 后 ditto 重建 → **可重建**，删除不会破坏任何流程。窗口期风险仅「这次签名前没有快照可回退」；且官方 App 可重新下载恢复。",
       "dependencies": [],
-      "status": "blocked",
-      "evidence": "属主 root:wheel → 助手的 rm -rf 命中用户红线（不绕过，交用户执行）。唯一引用点是 uu.sh:878，且为「先删再建」的写法。命令：sudo rm -rf <项目根>/UURemote.app.before-certsign"
+      "status": "done",
+      "evidence": "已删除：项目体积 227M → 50M。删前复核两点：① 唯一引用点是 uu.sh:878，且为「先 rm -rf 再 ditto 重建」的写法（只写不读，从不作为输入）；② 该处失败提示本身就写着「原始库备份仍可还原补丁」—— 说明它不是还原路径，真正的还原源是 shim/backup/UURemoteServer.orig + libstreamer.dylib.orig。下次 `uu.sh sign` 会自动重建该快照。剩余 50M 全为活依赖：libstreamer.dylib.orig(25M) + shim/backup/UURemoteServer.orig(24M)。"
     },
     {
       "id": "feat-104",
