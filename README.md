@@ -408,14 +408,45 @@ uuremote-cg-patch/
 ├─ tools/                  ← 辅助工具（setmode 分辨率切换 / 监控 / 探针 / 整理）
 ├─ evidence/               ← 根因分析与实测结论（.md）
 ├─ libstreamer.dylib.orig  ← 官方原库备份（还原靠它，别删）
-└─ libstreamer.dylib.patched
+└─ UURemote.entitlements   ← 重签时保留 UU 的权限声明（uu.sh sign 强制要求，别删）
 ```
 
 **回退**：整合前的 9 个脚本不再保留（其逻辑已逐字并入 `uu.sh`）。
 要撤销补丁用 `sudo bash uu.sh restore`，撤销 shim 用 `sudo bash uu.sh shim-restore`。
 
-**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本不再保留（需要时从 git 历史取）。
-`libuushim.c` 是唯一真源，任何 dylib 都可由它重新编译。
+**版本管理**：`shim/` 只保留现役版 + 上一版（作回退），更老的版本不再保留
+（需要时从 git 历史取：`git show <提交>:shim/libuushim_v13.dylib > /tmp/x.dylib`）。
+
+### 重建命令（`libuushim.c` 是唯一真源，三条命令即可复原全部二进制）
+
+```bash
+# ① 帧源 shim（第 2 道门）
+#    ⚠️ 五个 framework 缺一不可 —— 少 IOSurface 会链接失败（_IOSurfaceCreate 未定义）
+clang -dynamiclib -O2 -o shim/libuushim.dylib shim/libuushim.c \
+  -framework CoreGraphics -framework CoreVideo -framework Foundation \
+  -framework IOSurface -framework CoreFoundation
+
+# ② CPU 帧转换（第 4 道门）
+clang -dynamiclib -O2 -o cpupath/libuucpupath.dylib cpupath/libuucpupath.c \
+  -framework CoreVideo -framework CoreFoundation -framework IOSurface
+
+# ③ 分辨率切换工具（源码 → 二进制）
+swiftc -O -o tools/setmode tools/setmode.swift
+```
+
+**编译产物与 App 里现役的那份字节数不同，属正常**，不要因此怀疑装错：
+
+| | 字节 | 签名 | 说明 |
+|---|---|---|---|
+| 仓库 `shim/libuushim.dylib` | 33000 | 未签名 | 待装源，`uu.sh shim-install` 直接取它 |
+| App 内现役 | 51600 | 已签名 | 装机后经 `uu.sh sign` 重签 + 带 extra-ents |
+
+判据不是字节数，而是 `bash uu.sh shim-status` 报「补丁库在位」且会话真能出帧
+（`tail /tmp/uushim.log`）。另：编译产物字节数可复现（33000），但 **md5 每次不同** ——
+Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
+
+**为什么这些编译产物仍入库**：`shim/libuushim.dylib` 与 `cpupath/libuucpupath.dylib` 都在
+装机路径上（脚本**不会**自动编译，直接取文件），删了装机就断。`tools/setmode` 同理（AGENTS.md 指向它）。
 
 **整理工具**：`bash uu.sh cleanup`（演练）/ `bash uu.sh cleanup --apply`（执行）。
 **口径：不搞 `archive/` 目录 —— git 历史就是归档。** 只删两类：

@@ -1325,10 +1325,15 @@ else
 fi
 
 hd "2/4 恢复原版 UURemoteServer"
-cp "$BACKUP" "$TARGET" && ok "已恢复（$(stat -f '%z' "$TARGET") 字节）" || { no "恢复失败"; exit 1; }
-if otool -L "$TARGET" 2>/dev/null | grep -qF 'libuushim'; then
-  no "原版备份里竟然含依赖 —— 备份可能被污染，已中止"; exit 1
+# ★ 顺序要紧：**先校验备份干净，再覆盖目标**。
+#   反过来的话，一旦备份被污染（例如在已注入状态下重跑 shim-install 覆盖了备份），
+#   目标已被污染文件写掉、本地又没有第二份原库 —— 只能重装 UU 才能救回。
+if otool -L "$BACKUP" 2>/dev/null | grep -qF 'libuushim'; then
+  no "备份已被污染（内含 libuushim 依赖），拒绝覆盖：$BACKUP"
+  no "请去 uuyc.163.com 覆盖安装 UU 取得干净原库后，再重跑本命令"
+  exit 1
 fi
+cp "$BACKUP" "$TARGET" && ok "已恢复（$(stat -f '%z' "$TARGET") 字节）" || { no "恢复失败"; exit 1; }
 ok "确认已无 libuushim 依赖"
 
 hd "3/4 删除补丁库"
