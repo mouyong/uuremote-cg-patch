@@ -42,7 +42,7 @@ bash uu.sh status         # 项目运行态总览
 |---|---|
 | `rm -rf /`、`rm -rf /*`、`shutdown`、`reboot` | `sudo rm -rf <任意路径>`、抹盘、`dd` 写裸设备、`docker prune`、强推、`find -delete` |
 
-⇒ **本机 sudo 免密 + deny 已空 = agent 可以 `sudo rm -rf /Users/<user>` 而没有任何拦截。**
+⇒ **本机 sudo 免密 + deny 已空 = agent 可以 `sudo rm -rf /Users/<用户名>` 而没有任何拦截。**
 
 - 退役的 35 条规则留存于 **`~/.hermes/deny-rules-retired.yaml`**（一行可还原）
 - 配置备份：`~/.hermes/config.yaml.bak-20260927-190435`

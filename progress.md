@@ -145,7 +145,7 @@ bash uu.sh watchdog --dry
 |---|---|
 | `rm -rf /`、`rm -rf /*`、`shutdown`、`reboot` | `sudo rm -rf <任意路径>`、抹盘、`dd` 写裸设备、`docker prune`、强推… |
 
-📌 **安全态势已变，后续会话必须知道**：本机 sudo 免密 + deny 已空 = agent 可 `sudo rm -rf /Users/<user>`
+📌 **安全态势已变，后续会话必须知道**：本机 sudo 免密 + deny 已空 = agent 可 `sudo rm -rf /Users/<用户名>`
 而**无任何拦截**。规则留存于 `~/.hermes/deny-rules-retired.yaml`（35 条），
 配置备份 `~/.hermes/config.yaml.bak-20260927-190435`，一行可还原。
 
