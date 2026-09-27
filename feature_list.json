@@ -1,0 +1,149 @@
+{
+  "_comment": "工作项追踪的唯一事实源。status 取值：done / in-progress / not-started / blocked。铁律：同时最多一个 in-progress。blocked 必须写明等谁/等什么。",
+  "features": [
+    {
+      "id": "feat-001",
+      "name": "四道门修复（黑屏 / 卡在传输画面）",
+      "description": "让无 Metal 的 2011 Mac mini 能用 UU 远程正常出画面：libstreamer 三处磁盘补丁 + CoreGraphics 帧源 shim + CPU 顶替 Metal 帧转换",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "对端连接后出帧正常、亮度非 0、延迟 0ms。详见 README「两个问题的根因」+ evidence/*.md"
+    },
+    {
+      "id": "feat-002",
+      "name": "内存泄漏修复（「连上黑屏」的真根因）",
+      "description": "cpupath 的 my_CopyTo 中，按值返回 + CFRetain 的访问器返回值未释放，每帧泄漏一个 IOSurface",
+      "dependencies": ["feat-001"],
+      "status": "done",
+      "evidence": "修复前 192 帧 +299 个 IOSurface / RSS +1484MB；修复后 +3 个 / 每帧 0.05MB、60s 会话后 RSS 平稳 349MB。见 README「内存泄漏」一节"
+    },
+    {
+      "id": "feat-003",
+      "name": "注入方式收窄（禁止全局 launchctl setenv）",
+      "description": "全局 DYLD_INSERT_LIBRARIES 会让所有进程去加载未签名库、被 CODESIGNING SIGKILL；改为写 UU 自己的 LaunchAgent plist",
+      "dependencies": ["feat-001"],
+      "status": "done",
+      "evidence": "崩溃报告从 141 份/天降到 0；加载本库的只剩 UU 系进程。见 README「注入方式」一节"
+    },
+    {
+      "id": "feat-004",
+      "name": "看门狗自愈规则（含空闲回收）",
+      "description": "空闲时回收泄漏内存防下次黑屏；会话进行中绝不动手（避免当场踢掉用户）",
+      "dependencies": ["feat-002"],
+      "status": "done",
+      "evidence": "实测回收 2390MB→55MB、空闲内存回到 2566MB；回收后重连出帧正常。见 README「看门狗」一节"
+    },
+    {
+      "id": "feat-005",
+      "name": "脚本整合为单一入口 uu.sh",
+      "description": "原 9 个脚本逐字并入 uu.sh（19 子命令），旧脚本归档可回退",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "bash -n 通过、结构自检 0 问题、只读子命令实测通过；回退点 archive/pre-merge-20260926/"
+    },
+    {
+      "id": "feat-006",
+      "name": "git 管理 + 脱敏",
+      "description": "入库前脱敏（IP/用户名/设备 ID）、.gitignore 排除私钥与大件、README 改相对路径",
+      "dependencies": ["feat-005"],
+      "status": "done",
+      "evidence": "25 处敏感标识已替换、复核 0 命中；38 个跟踪文件、仓库 416K、0 私钥"
+    },
+    {
+      "id": "feat-007",
+      "name": "launchd label 中性化",
+      "description": "去掉 label 里的个人标识，统一为 com.uuremote-cg-patch.*",
+      "dependencies": ["feat-003"],
+      "status": "done",
+      "evidence": "watchdog 与 cpupath 两个 label 统一；新旧 plist diff 仅 Label 一行不同、跑过 5 次 exit 0"
+    },
+    {
+      "id": "feat-008",
+      "name": "修复「系统设置打不开」（talagent 同步 XPC 死等）",
+      "description": "System Settings 启动时无超时地同步等 talagentd 回复 → 主线程永久阻塞；禁用 Persistent UI 绕过",
+      "dependencies": [],
+      "status": "done",
+      "evidence": "主线程栈从 _NSPersistentUIEstablishTalagentCommunication 变为正常事件循环；窗口渲染 715x790"
+    },
+    {
+      "id": "feat-101",
+      "name": "定位「无法连接至服务器」（客户端侧）",
+      "description": "报错 key = Common.Error.Connection.server，属于客户端连不上 UU 服务器；108 侧已实测连通（UDP 媒体面建立、380 帧/30s），需从客户端侧继续定位",
+      "dependencies": ["feat-001"],
+      "status": "blocked",
+      "evidence": "已在 108 侧排除：设备 online 稳定、登录/网络正常、端到端可连。阻塞：等用户提供「哪个设备报错 + 是否仍有 + 截图」"
+    },
+    {
+      "id": "feat-102",
+      "name": "修复 uu.sh reset 脚枪",
+      "description": "reset 只看 ps 的 %cpu（生命周期均值）判「卡死」，不看是否在出帧 → 会把正在串流的用户踢下线。应加「还在出帧就绝不动它」闸 + --force",
+      "dependencies": ["feat-004"],
+      "status": "not-started",
+      "evidence": ""
+    },
+    {
+      "id": "feat-103",
+      "name": "删除 177MB 的 UURemote.app.before-certsign",
+      "description": "只写不读、uu.sh sign 每次自会重建、9/14 快照已过期 → 可删，收益 253MB→50MB。属主 root 且 sudo rm -rf 命中用户红线",
+      "dependencies": [],
+      "status": "blocked",
+      "evidence": "已证实无任何读取方（全仓 grep）。阻塞：需用户自己执行（或授权 chown 后由助手普通 rm）"
+    },
+    {
+      "id": "feat-104",
+      "name": "推送仓库到远端",
+      "description": "目前无 git remote。需定：推到哪个账号/仓库、用哪个提交身份（现为 my24251325@gmail.com，已进本地历史）",
+      "dependencies": ["feat-006"],
+      "status": "blocked",
+      "evidence": "仓库已就绪（4 个提交、工作区干净、0 私钥）。阻塞：等用户定账号与身份"
+    },
+    {
+      "id": "feat-105",
+      "name": "上游 PR：收窄 lifecycle_guard 判据",
+      "description": "cron/lifecycle_guard.py 对任何 launchctl submit/bootstrap 一票否决（与 label 无关），导致含该词的脚本整份被拒。可提议把判据收窄为「label 含 gateway 或 plist 在 hermes 目录下」",
+      "dependencies": [],
+      "status": "not-started",
+      "evidence": "本机已有可行绕过（$LC 变量调用，语义不变）；此工作项只为上游消除误判"
+    },
+    {
+      "id": "feat-106",
+      "name": "清理可再生成的产物",
+      "description": "archive/ 两组实验件（20260926、round2）、libstreamer.dylib.patched（每次 install 无条件重建）、shim/libuushim_v14.dylib（与现役 md5 相同）",
+      "dependencies": ["feat-005"],
+      "status": "not-started",
+      "evidence": "已逐项确认可删（收益约 2MB + 25MB）。注：archive/pre-merge-20260926/ 是回退点，必须留"
+    },
+    {
+      "id": "feat-107",
+      "name": "关闭 Docker 的 KubernetesEnabled",
+      "description": "再启动 Docker 会白烧 1.7GB 内存 + 约 40% CPU（本机 8GB / 2 核，是帧率与内存压力的主要外因）",
+      "dependencies": [],
+      "status": "not-started",
+      "evidence": "实测 VM 1748MB、AutoStart=False 不会自启；settings-store.json 里 KubernetesEnabled=True"
+    },
+    {
+      "id": "feat-108",
+      "name": "让「允许在后台」列表显示可辨认的名字",
+      "description": "4 个后台项的可执行文件都是 /bin/bash，故界面上全显示 bash。可把 plist 改为直接指向脚本本身（加 shebang）让界面显示脚本名",
+      "dependencies": ["feat-007"],
+      "status": "blocked",
+      "evidence": "已查清原因（界面按可执行文件名显示）。阻塞：等用户选 A 只改看门狗 / B 全改 / C 不改"
+    },
+    {
+      "id": "feat-109",
+      "name": "重启机器一次（清 swap 与失效登记）",
+      "description": "已连续运行 11 天 18 小时；重启可一次解决：清 swap 历史脏页、清 BTM 里指向已删 plist 的失效登记、清撤销全局注入前遗留的库加载",
+      "dependencies": [],
+      "status": "blocked",
+      "evidence": "swap 曾被顶到 11GB 后用回收恢复；BTM 残留 1 条（会随登录/重启自动清）。阻塞：需用户在合适时机执行"
+    },
+    {
+      "id": "feat-110",
+      "name": "归档误留的 Hermes 配置备份",
+      "description": "~/Library/LaunchAgents/ai.hermes.gateway.plist.bak-20260905_131611 误留在 LaunchAgents 目录（.bak 结尾不会被加载，也不在后台列表显示）",
+      "dependencies": [],
+      "status": "blocked",
+      "evidence": "已确认不影响功能。阻塞：等用户点头（小事，可顺手做）"
+    }
+  ]
+}

@@ -1720,7 +1720,7 @@ watchdog_loop() {
   if [ -f "$pidfile" ]; then
     local old; old=$(cat "$pidfile" 2>/dev/null || echo 0)
     if [ -n "$old" ] && [ "$old" -gt 0 ] && kill -0 "$old" 2>/dev/null; then
-      echo "已有循环在跑 pid=$old，本次退出"; exit 0
+      echo "已有循环在跑 pid=${old}，本次退出"; exit 0
     fi
   fi
   echo $$ > "$pidfile"
