@@ -110,14 +110,14 @@ git show 9b8427a:cpupath/install.sh > /tmp/install.sh                      # cpu
 | 文件 | 作用 | 注意 |
 |---|---|---|
 | `AGENTS.md` | 本项目的指令与铁律（**开工先读**） | 受保护的 agent 指令文件，改它会被写工具拦截，需走 terminal |
-| `uu.sh` | **唯一入口**，22 个子命令 | 整合自原 12 个脚本；`install`/`restore` 已补全四道门 |
+| `uu.sh` | **唯一入口**，27 个子命令（`help` 看全部）| 整合自原 12 个脚本；`install` 会走全四道门 |
 | `README.md` | 完整技术手册（根因、四个 bug 的查证过程、目录结构、**重建命令**） | 深水区问题查这里，不要另起文档 |
 | `init.sh` | 启动 / 验证入口（harness 的 verification） | 只读，不改系统状态 |
 | `test.sh` | **端到端验收测试**（本项目没有单元测试框架，此即其「测试」） | 自带安全闸：有人正在用时 SKIP |
 | `feature_list.json` | 工作项状态的唯一事实源 | 同时最多一个 `in-progress` |
 | `progress.md` | 会话连续性日志（倒序追加） | 与 skill 的分工：长期结论进技能，会话轨迹进这里 |
 | `cpupath/libuucpupath.c` | 第 4 道门：CPU 顶替 Metal 帧转换 | ★ 泄漏修复在 `my_CopyTo`：新出口必须 `goto out`；日志格式 v18 起带日期 |
-| `uu.sh cpupath-install` | 第 4 道门安装/状态（**二进制级注入**） | ★ 绝不许退回 `launchctl setenv` 或写 UU plist 的老路（铁律 20）；库与 shim 一起由 `sign` 部署 |
+| `uu.sh cpupath-install` | 第 4 道门**预处理**（清历史环境变量注入 + 装运行时副本）；库的部署与重签由 `shim-install` 一并做 | ★ 绝不许退回 `launchctl setenv` 或写 UU plist 的老路（铁律 20）|
 | `shim/libuushim.c` | 帧源 shim 唯一真源（任何 dylib 都由它编译） | 现役 **v18**（日志时间戳加日期）；编译需**五个 framework**（含 CoreGraphics），少一个链接失败 |
 | `tools/cleanup.py` | 项目整理（`uu.sh cleanup`，默认演练） | 清单易过时：**只列真实存在的项**，改完必跑一次演练核对 |
 | `tools/rehearse.sh` | 改脚本后的演练包装（AGENTS.md 铁律检查项） | 不碰正式 App、不要 sudo；日志落 `shim/rehearsal-*.log` |

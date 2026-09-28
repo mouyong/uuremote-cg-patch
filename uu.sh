@@ -2593,10 +2593,15 @@ cmd_install_all() {
   need_root || return 1
   hd "第1步：采集器 + 编码器门禁（cg-install）"
   cg_install_main || { no "cg-install 失败，已中止"; return 1; }
-  hd "第2步：帧源 shim（shim-install）"
-  shim_install_main || { no "shim-install 失败，已中止"; return 1; }
-  hd "第3步：CPU 顶替 Metal 帧转换（cpupath-install）"
+  # ★ 顺序说明（2026-09-28 调整）：第 4 道门现在也走**二进制级注入**，
+  #   实际「部署库 + 加 LC_LOAD_DYLIB + 重签」由 shim-install 一并完成
+  #   （见 sign_main 的 3/5、4/5 步）。所以先让 cpupath-install 清掉历史遗留的
+  #   环境变量注入、装运行时副本，再由 shim-install 统一部署 + 重签。
+  #   反过来（shim-install 在前）会让 cpupath-install 再重启一次 UU，白多一轮。
+  hd "第2步：第4道门预处理 —— 清历史注入 + 运行时文件（cpupath-install）"
   cpupath_install_main
+  hd "第3步：帧源 shim + 两个补丁库的部署与重签（shim-install）"
+  shim_install_main || { no "shim-install 失败，已中止"; return 1; }
   hd "第4步：保证服务进程在跑（否则设备显示离线、连不上）"
   server_agent_up || true
   hd "第5步：保证看门狗已装（无人值守时自动回收内存 / 兜底拉起 server）"
@@ -2661,13 +2666,13 @@ UU远程 修复工具集 —— 单文件入口
   daemon              重启 root 守护进程（修「无法连接至服务器 1001」）[sudo]
 
 【安装 / 还原】（重装 UU、UU 自动更新覆盖补丁之后）
-  install             一键装全套 = cg-install + shim-install + cpupath-install  [sudo]
+  install             一键装全套 = cg-install + cpupath-install + shim-install  [sudo]
   restore             一键还原全套                                              [sudo]
   cg-install          只装第1/3道门（libstreamer 门禁补丁）                      [sudo]
   cg-restore          只还原上述门禁补丁                                        [sudo]
-  shim-install        只装第2道门（截图轮询帧源）                                [sudo]
+  shim-install        装第2道门（帧源）★ 同时部署两个补丁库并重签（= 第4道门的部署）[sudo]
   shim-restore        只还原帧源替换                                            [sudo]
-  cpupath-install     只装第4道门（CPU 顶替 Metal 帧转换 + 持久化）
+  cpupath-install     第4道门预处理：清历史环境变量注入 + 装运行时副本（部署靠 shim-install）
   cpupath-status      看第4道门状态（含"全局注入是否为空"检查）
   cpupath-uninstall   只卸载第4道门
   sign                重新签名（修「设备不上线 / XPC 被拒」）                    [sudo]

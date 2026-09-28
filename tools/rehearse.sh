@@ -50,7 +50,7 @@ fi
 echo
 echo "=== 结果 ==="
 grep -E 'INSTALL_RC|RESTORE_RC' "$LOG" | sed 's/^/  /'
-echo "  ✘ 条数: $(grep -c '✘' "$LOG")"
+echo "  ✘ 失败条数: $(grep -c '✘' "$LOG")（应为 0）"
 grep -E '错误 OU|整包校验|补丁在|确认已无' "$LOG" | head -6 | sed 's/^/  /'
 echo "  日志: $LOG"
 

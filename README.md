@@ -22,7 +22,9 @@ sudo bash $D restore
 sudo bash $D reset
 
 # ⑤ 报「无法连接至服务器 1001」/ 本机不上线
-sudo bash $D sign      # 重签名（修签名不一致）
+#    ★ 先查权限集：GUI 权限若为空、且 UURemoteService 每 3 秒拒一次 XPC，
+#      就是重签把官方权限削掉了（见「问题二」一节）→ 用 sign 补回
+sudo bash $D sign      # 重签名（修签名 / 权限不一致）
 sudo bash $D daemon    # 重启 root 守护进程（修状态陈旧）
 
 # ⑥ 查 UU 实际走了哪套采集器（免 sudo，手机连过一次后跑）
@@ -32,10 +34,14 @@ bash $D verify
 #     实测**不能**降低码流负载（见文件末尾「关于分辨率」一节）
 bash $D setmode list       # 看可选分辨率（含 1080p/900p/720p 俗称与像素占比）
 bash $D setmode 720p       # 切成 1280x720（俗称写法，等价 setmode 1280x720）
+
+# ⑧ 「连上没画面」先查第 4 道门是否**真的加载**（配置在 ≠ 生效）
+bash $D cpupath-status     # 第 2 节必须出现「当前 server(pid=…) 已加载本库」
 ```
 
-`install` = `cg-install`（第1/3/4道门）+ `shim-install`（第2道门），会自动完成：
-识别 UU 版本 → 重建基线 → 定位补丁点 → 打补丁 → 注入帧源 → 用证书重签名 → 启动。
+`install` = `cg-install`（第1/3道门）+ `cpupath-install`（第4道门预处理：清历史注入、
+装运行时副本）+ `shim-install`（第2道门；**同时把两个补丁库部署进 App 并重签**），会自动完成：
+识别 UU 版本 → 重建基线 → 定位补丁点 → 打补丁 → 部署帧源与帧转换库 → 用证书重签名 → 启动。
 **UU 每次自动更新后，直接重跑 `install` 就行。**
 
 全部子命令：`bash $D help`
@@ -120,7 +126,10 @@ sudo bash uu.sh install
 ⚠️ 附带一个真实风险：因为它们被忽略，`git status` 看不见它们，
 **`git clean -fdx` 会把它们一起删掉**。不要在这个仓库里跑 `git clean -fdx`。
 
-## 两个问题的根因（都查实了，有对照组）
+## 根因清单（都查实了，有对照组）
+
+> 按症状分：黑屏 / 卡在「正在传输画面」、连不上 / 不上线、连上没画面。
+> 每一条都有实测数据与对照实验；四条真根因的完整修复过程见 `progress.md`。
 
 ### 问题一：纯黑屏 / 卡在「正在传输画面」
 
@@ -233,33 +242,75 @@ CG  系（好）：ToDesk(CGDisplayStream)、系统屏幕共享、本工具的�
 
 ### 问题二：「无法连接至服务器 1001」+ 本机不上线
 
-**根因：组件签名不满足 UU 的内部校验。** UU 二进制里的校验代码：
+**三层校验，缺任何一层都会被拒。** UU 二进制里的校验代码（反汇编实读）：
 
 ```
 verifyWithRequirementString(secCode:)
-certificate leaf[subject.OU] =              ← 用证书 OU 字段当 TeamID 校验
+certificate leaf[subject.OU] =               ← 用证书 OU 字段当 TeamID 校验
 Client satisfies teamID requirement for:
-Hardened runtime is not set for the sender  ← 还检查 hardened runtime
+Hardened runtime is not set for the sender   ← 还检查 hardened runtime
 NSXPC client does not match any allowed teamID:
 ```
 
-所以打补丁后重签时，组件必须同时满足：
+（函数真名 `verifyHardenedRuntimeAndEntitlements(secStaticCode:)`。）
+
+**第 1、2 层：证书 + hardened runtime。** 打补丁后重签时，组件必须同时满足：
+
 1. 有证书，且 `OU = PU9BNSBJW7`（网易官方 TeamID）
 2. 启用 hardened runtime（`flags=0x10000(runtime)`）
 
-而 adhoc 签名（`codesign -s -`）**两条都不满足** → 组件间 XPC 被拒
-（日志：`Peer connection was rejected by the listener (xpc_connection_cancel())`）→
-被控服务注册不上 → 设备不上线、别的电脑看不到它。
-
-**修法**：用一张 `OU=PU9BNSBJW7` 的自签证书 + `--options runtime` 重签全部组件。
-UU 的校验串里**不含 `anchor apple generic`**（全组件 grep 计数 = 0），
-所以自签证书能满足，不需要 Apple 签发。已实测（含反向对照）：
+UU 的校验串里**不含 `anchor apple generic`**（全组件 grep 计数 = 0）→ 自签证书够用，
+不需要 Apple 签发。已实测（含反向对照）：
 
 ```
-✔ certificate leaf[subject.OU] = "PU9BNSBJW7"                   通过
-✔ identifier "com.netease.uuremote" and ...OU = "PU9BNSBJW7"    通过
-✘ ...OU = "WRONGTEAM9"                                          失败（对照有效）
+✔ certificate leaf[subject.OU] = "PU9BNSBJW7"                    通过
+✔ identifier "com.netease.uuremote" and ...OU = "PU9BNSBJW7"     通过
+✘ ...OU = "WRONGTEAM9"                                           失败（对照有效）
 ```
+
+**第 3 层：官方权限集（entitlements）—— 2026-09-28 定位到的真根因。**
+
+校验函数会同时比对组件的 entitlements，而**我们重签时把 GUI 的权限弄丢了**：
+
+| 组件 | 官方（对照机实测）| 被削后（事故当时）|
+|---|---|---|
+| `UURemote`（GUI）| `audio-input` + `bluetooth` | **空** |
+| `UURemoteServer` | `audio-input` | 正常 |
+| `UURemoteService` / `UURemoteDaemon` | 无 | 无 |
+
+⇒ `UURemoteService` 每 **3 秒**拒一次 GUI 的 XPC（**20~115 次/分**）→ GUI 与 Service 之间
+那条承载**会话授权**的通道断掉 → 会话永远完不成 → 界面报「无法连接至服务器 / 1001」，
+**别的设备连上来就是没有画面**。补回这两个权限后：**XPC 拒绝归零、界面红框消失**。
+
+**教训（两条都无声、都不让签名报错）**：
+
+1. 官方权限集文件（`UURemote.entitlements`）曾**只被 `[ -f ]` 检查、从未进 `--entitlements`**
+   → GUI 权限在某一轮重签里被永久削掉（此后每次都以「已削过的当前值」为基准 → **永不自愈**）。
+2. UU 另有一份**禁用权限黑名单**：`disable-library-validation`、`get-task-allow`、`allow-jit`、
+   `allow-dyld-environment-variables`、`allow-unsigned-executable-memory`。
+   我们给 `UURemoteServer` 加的 `disable-library-validation` 正在名单里 —— **别让它扩散到别的组件**。
+
+**修法**：`uu.sh` 的 `sign_one` 以「当前 ∪ 官方备份 ∪ 我们的额外权限」**并集**为基准，
+并让官方权限集文件真的进 `--entitlements`。改签名逻辑后必做机器核对（不动正式 App）：
+
+```bash
+ditto /Applications/UURemote.app /tmp/uurt-check.app
+UURT_APP=/tmp/uurt-check.app UURT_REHEARSE=1 bash uu.sh sign
+# 必须出现这一行（GUI，恰好这两个权限）：
+#   + 权限：com.apple.security.device.audio-input,com.apple.security.device.bluetooth
+# 别和 server 那行混淆 —— 它会多带 disable-library-validation：
+#   + 权限：com.apple.security.cs.disable-library-validation,com.apple.security.device.audio-input
+```
+
+不放心日志就直接读结果：
+
+```bash
+codesign -d --entitlements - /Applications/UURemote.app/Contents/MacOS/UURemote 2>&1 \
+  | grep -o 'com.apple[a-z.-]*' | sort -u
+# 期望恰好两行：com.apple.security.device.audio-input、com.apple.security.device.bluetooth
+```
+
+**排查口诀**：**G（GUI）权限空 + S（Service）每 3 秒拒** → 先查权限集，别去猜网络 / 代理。
 
 ## 版本自适应（为什么 UU 更新后不用重新分析）
 
@@ -307,6 +358,8 @@ tccutil reset Accessibility com.netease.uuremote
 
 ## 怎么确认修好了
 
+**主机侧判据**（可自动跑；但注意下面那条警告）：
+
 ```bash
 # 1) 状态与签名自检
 bash uu.sh status
@@ -314,10 +367,25 @@ bash uu.sh status
 # 2) 采集器是否走 CG（应无 -3802、无 SCStream 报错）
 bash uu.sh verify
 
-# 3) XPC 是否还被拒（应无输出）
-log show --last 2m --predicate 'process == "UURemoteDaemon"' --style compact \
+# 3) XPC 是否还被拒 —— 查 UURemoteService（那才是真故障），应无输出
+log show --last 2m --predicate 'process == "UURemoteService"' --style compact \
   | grep -a 'rejected by the listener'
+
+# 4) 第 4 道门（CPU 帧转换）是否**真的加载**（必须看到当前 server 的 pid）
+bash uu.sh cpupath-status        # 看第 2 节「实际加载证据」
+# 或直接：sudo vmmap $(pgrep -x UURemoteServer | head -1) | grep -c libuucpupath
 ```
+
+**⚠️ 两条容易把人带偏的判据（实测踩过）**：
+
+- **别拿 `UURemoteDaemon` 的「被拒」当故障**：它每 60 秒有一条
+  `Peer connection was rejected` 是**正常重连**（随后立刻 `Re-initialization successful`，
+  并转连 `com.uuremote.daemon.peer`），拿它当判据会一直误报。
+  真正要查的是 **`UURemoteService`**（GUI 权限被削时它每 3 秒拒一次，20~115 次/分）。
+- **主机侧全绿 ≠ 客户端能看到画面**：本项目历史上所有「PASS」都只是主机侧判据
+  （出帧增长、亮度非黑），**从来没验证过客户端侧** —— 这正是「别的设备连上去没有画面」
+  能藏很久的根本原因。**唯一可靠的判据是：用另一台设备连一次，亲眼看到画面。**
+  本机自身不行（无 Metal，客户端窗口渲染不出，只会停在「正在传输画面」），只能人肉验证。
 
 ## 注意事项（踩过的坑）
 
@@ -381,11 +449,17 @@ log show --last 2m --predicate 'process == "UURemoteDaemon"' --style compact \
 一律改成 false 等于让整个库以为跑在远古 macOS 上，**编码器和 OpenSSL 的判定会被连带打乱**，
 故障模式不可预测。所以选择**按点精确改**：只翻转我们要的那 5 个字节，其余一律不碰。
 
-**另一个「一处生效」的思路也已排除**：用 `DYLD_INSERT_LIBRARIES` interpose
-`__availability_version_check`（一处覆盖所有版本判定）。代价是要给 App 加
-`com.apple.security.cs.disable-library-validation` 权限（削弱签名强制），
-且**仍然治不了 #3 编码器**（它不是版本判定）。所以最少也得是「版本判定 + 编码器」两处，
-按点补丁（3 处）反而是更保守、可无损还原的方案。
+**另一个「一处生效」的思路**：用 interpose 顶替 `__availability_version_check`
+（一处覆盖所有版本判定）。这条路**没有走**，但不是因为做不到 ——
+我们后来正是用 `__DATA,__interpose` 解决了采集器问题（第 2 道门）与帧转换问题（第 4 道门）。
+原因有二：
+
+1. 它**治不了 #3 编码器**（编码器门禁不是版本判定，是另一段逻辑）；
+2. interpose 要求目标进程放宽库校验（`com.apple.security.cs.disable-library-validation`）——
+   该权限正在 UU 自己的**禁用黑名单**里 → 只给 `UURemoteServer` 一个组件加，**绝不让它扩散**。
+
+所以：**版本判定这一层仍按点补丁**（只翻转要的那 5 个字节，最保守、可无损还原），
+interpose 只用于「帧源」与「帧转换」这两处。
 
 ## 演练模式（改脚本后必做）
 
@@ -419,17 +493,20 @@ UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 \
 
 ```
 uuremote-cg-patch/
-├─ uu.sh                   ← ★ 唯一入口（22 个子命令：install/restore/status/verify/
-│                            cg-install/cg-restore/shim-install/shim-restore/sign/
-│                            daemon/reset/watchdog/watchdog-loop/watchdog-stop/
-│                            monitor/traffic/encoder/setmode/cleanup/help）
+├─ uu.sh                   ← ★ 唯一入口（27 个子命令，`bash uu.sh help` 看全部）：
+│                            status/verify/install/restore/cg-install/cg-restore/
+│                            shim-install/shim-restore/cpupath-install/cpupath-status/
+│                            cpupath-uninstall/sign/daemon/reset/watchdog/watchdog-install/
+│                            watchdog-loop/watchdog-stop/server-agent/server-agent-status/
+│                            server-agent-down/monitor/traffic/encoder/setmode/cleanup/help
 ├─ patch_tool.py           ← 版本自适应定位/打补丁/反推官方库（uu.sh 调用）
 ├─ cert/                   ← 自签证书
 ├─ extra-ents/             ← 额外权限声明
 ├─ cpupath/                ← 第 4 道门修复（CPU 顶替 Metal 帧转换；装/查/卸已并入 uu.sh）
+│   └─ libuucpupath.dylib     现役待装源（装机时由 shim-install 部署进 App + 重签）
 ├─ shim/                   ← 帧源替换 shim（源码 + 现役 dylib + 原库备份）
 │   ├─ libuushim.c            源码（唯一真源）
-│   ├─ libuushim.dylib        现役待装源（= 最新版 v14）
+│   ├─ libuushim.dylib        现役待装源（= 最新版 v18，日志时间戳带日期）
 │   └─ backup/UURemoteServer.orig  UURemoteServer 原库（装机/还原的活依赖，别删）
 ├─ tools/                  ← 辅助工具（setmode 分辨率切换 / 监控 / 探针 / 整理）
 ├─ evidence/               ← 根因分析与实测结论（.md）
@@ -462,15 +539,16 @@ swiftc -O -o tools/setmode tools/setmode.swift
 ```
 
 **编译产物与 App 里现役的那份字节数不同，属正常**，不要因此怀疑装错：
+装机时 `uu.sh shim-install` 把库部署进 App，随后 `uu.sh sign` 对它们重签，
+**签名会让文件变大**（本机实测约 +18.5KB，两个库都一样）。别再记具体字节数（会随版本变）。
 
-| | 字节 | 签名 | 说明 |
-|---|---|---|---|
-| 仓库 `shim/libuushim.dylib` | 33000 | 未签名 | 待装源，`uu.sh shim-install` 直接取它 |
-| App 内现役 | 51600 | 已签名 | 装机后经 `uu.sh sign` 重签 + 带 extra-ents |
+判据不是字节数，而是这三条：
 
-判据不是字节数，而是 `bash uu.sh status` 报「补丁库在位」且会话真能出帧
-（`tail /tmp/uushim.log`）。另：编译产物字节数可复现（33000），但 **md5 每次不同** ——
-Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
+1. `bash uu.sh status` 报「补丁库在位」；
+2. `bash uu.sh cpupath-status` 第 2 节能看到**当前 server pid 的加载记录**；
+3. 会话真能出帧（`tail /tmp/uushim.log`）。
+
+另：编译产物字节数可复现，但 **md5 每次不同** —— Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
 
 **为什么这些编译产物仍入库**：`shim/libuushim.dylib` 与 `cpupath/libuucpupath.dylib` 都在
 装机路径上（脚本**不会**自动编译，直接取文件），删了装机就断。`tools/setmode` 同理（AGENTS.md 指向它）。
@@ -484,7 +562,7 @@ Mach-O 的 `LC_UUID` 每次编译都会变，属正常。
 
 | 文件 | 说明 |
 |---|---|
-| `uu.sh` | **唯一入口**：22 个子命令（`help` 看全部）。原 12 个脚本的逻辑逐字并入，未重写 |
+| `uu.sh` | **唯一入口**：27 个子命令（`help` 看全部）。原 12 个脚本的逻辑逐字并入，未重写 |
 | `patch_tool.py` | **版本自适应定位/打补丁/反推官方库** |
 | `cert/` | 自签证书（`cert.pem` / `key.pem` / `id.p12` / `openssl.cnf`） |
 | `libstreamer.dylib.orig` | **官方原库备份**（还原靠它，别删！） |
@@ -558,45 +636,58 @@ tail -f /tmp/uushim-watchdog.log   # 看它做过什么
 **取证要点**：`sudo vmmap --summary <pid> | grep IOSurface` 看**个数**列最直观；
 配合 `ps -o rss=` 前后对比，即可判断「按帧线性增长 = 泄漏」。
 
-## 注入方式：必须精准注入，绝不能用 `launchctl setenv`
+### 后续又发现两处同型泄漏（2026-09-28 修，v16）
 
-**正确**：把 `DYLD_INSERT_LIBRARIES` 写进 **UU 自己的 LaunchAgent plist**
-（`/Library/LaunchAgents/com.netease.uuremote.agent.plist` 的 `EnvironmentVariables`）——
-只有 UU 及其子进程会加载本库。
+上面那处修完后，**另外两条「摘除 / 回收 / 让位」路径**同样只把槽位映射置空、
+**没释放大块缓冲**（旧注释还写着「代价只是泄漏 ~200 字节」，实测是每槽位 27.5MB）：
 
-**禁止**：`launchctl setenv DYLD_INSERT_LIBRARIES ...` —— 那是 **launchd 用户域全局**变量，
-所有由 launchd 启动/继承环境的进程都会去加载我们的**未签名** dylib，
-被 macOS 的 CODESIGNING 保护直接 SIGKILL：
+| 路径 | 触发场景 |
+|---|---|
+| `slot_detach()`（start 失败时让出槽位）| `CVPixelBufferCreate` 失败 → 跳过启动采集线程 → 让出槽位 |
+| 「create 后超 60 秒未 start」的回收块 | 会话建了缓冲却没起来 |
+
+单会话 1600×900 ≈ **27.5MB**（3 个 IOSurface + 渲染缓冲 + 变化检测快照），
+漏约 **9 次**就把本机 **256MB** 显存吃光 → 新会话走「无可用缓冲，跳过启动采集线程」→
+**客户端没画面**。故障时段实测**有效连接率只有 63.8%**（约 36% 的连接拿不到缓冲），
+修复后 **100%**。
+
+**配套记账**（把这笔静默故障变成机器能核对的数）：日志里有
+`缓冲记账[…]: 活跃 N 会话 / 约 X MB` —— 会话中应为 `1 / 27.5MB`，断开后回到 `0 / 0.0MB`；
+**只涨不落就是又有新泄漏**。释放前必须判 `started==0`（有采集线程在跑就绝不释放，否则
+use-after-free）；结构体本身仍**刻意不 `free`** —— UU 可能还持着句柄来调 stop。
+
+## 注入方式：一律走**二进制级 `LC_LOAD_DYLIB`**（环境变量路线已废弃）
+
+**现行做法（2026-09-28 起）**：补丁库与 shim 一样部署进 App 的 `Contents/Frameworks/`，
+再给 `UURemoteServer` 二进制加一条依赖：
 
 ```
-termination: {namespace: CODESIGNING, indicator: Invalid Page, code: 2}
-exception:   SIGKILL (Code Signature Invalid)
+LC_LOAD_DYLIB → @loader_path/../Frameworks/libuucpupath.dylib
 ```
 
-**实测代价**：使用全局注入当天产生 **141 份**系统进程崩溃报告（前一天仅 1 份），
-涉及 devicecheckd / biomesyncd / ModelCatalogAgent / amsondevicestoraged /
-generativeexperiencesd 等系统守护进程；**连 `pgrep`、`screencapture` 一类命令行工具
-执行即被杀**（极易被误判成「没有录屏权限」）；系统卡顿，System Settings 都起不来。
-收窄到 plist 后：崩溃归零，系统恢复安静。
+随后重签整包（`sudo bash uu.sh shim-install`；`install` 会自动做）。
+不依赖环境变量、不受启动方式限制，且**能直接验证「真的加载了」**（见下）。
 
-**ad-hoc 签名救不了**：给 dylib 做 `codesign -f -s -`（install.sh 仍会做，无害）
-**不能**避免上述崩溃 —— 必须靠收窄注入范围。
+### 为什么不再用环境变量注入（两条路线都实测失效）
 
-**改 plist 后如何让 launchd 重读**：`launchctl unload` 然后 `launchctl load -w`。
-**`launchctl kickstart -k` 不会重读 plist** —— 实测新进程拿不到新环境变量 → 注入丢失 → 黑屏。
+| 路线 | 实测结果 |
+|---|---|
+| `launchctl setenv DYLD_INSERT_LIBRARIES …`（launchd **用户域全局**）| **禁止**：所有由 launchd 启动/继承环境的进程都会去加载我们的**未签名** dylib，被 macOS 的 CODESIGNING 保护直接 SIGKILL（`namespace: CODESIGNING` / `SIGKILL (Code Signature Invalid)`）。实测代价：**一天 141 份**系统进程崩溃报告（前一日仅 1 份），涉及 devicecheckd / biomesyncd / ModelCatalogAgent 等；**连 `pgrep`、`screencapture` 执行即被杀**（极易误判成「没有录屏权限」）；系统卡顿、System Settings 都起不来 |
+| 写进 **UU 自己的** plist（`/Library/LaunchAgents/com.netease.uuremote.agent.plist` 的 `EnvironmentVariables`）| **实测拿不到该变量** —— `launchctl print gui/$UID/com.netease.uuremote.agent` 的 `environment` 里**没有**它；库一个进程都没加载（`vmmap` 命中 **0**）|
+| 目标进程带 hardening runtime（`codesign -dv` 显示 `flags=0x10000(runtime)`）| macOS **整个忽略 `DYLD_*`**（除非该进程有 `allow-dyld-environment-variables` —— 那正在 UU 自己的**禁用权限黑名单**里）|
 
-**★ 2026-09-28 更新（此段原描述已失效，务必读完）**：上述「收窄到 UU 自己的 plist」这条路
-**实测同样失效** —— launchd 的 job 环境里拿不到该变量
-（`launchctl print gui/$UID/com.netease.uuremote.agent` 的 `environment` 里没有它），
-库一个进程都没加载（`vmmap` 命中 0）。而旧自检只查 plist 文本 → **长期假绿**。
+**给 dylib 做 ad-hoc 签名救不了**：`codesign -f -s -`（安装时仍会做，无害）**不能**避免上述崩溃。
 
-**现行走法：二进制级注入** —— 库与 shim 一样部署进 `Contents/Frameworks/`，
-给 `UURemoteServer` 加一条 `LC_LOAD_DYLIB → @loader_path/../Frameworks/libuucpupath.dylib`，
-随后重签整包（`sudo bash uu.sh shim-install`）。不依赖环境变量、不受启动方式限制。
+### 教训：自检不能查「配置文本」，必须查「实际生效」
 
-**自检也换了判据**（`bash uu.sh cpupath-status` 第 2 节）：不再看 plist 文字，
-而是核对「二进制依赖在位 + 库文件在 App 内 + **当前 server 进程有实际加载记录**」。
-第 3 节仍检查全局变量是否为空（非空 = 正在伤害系统）。
+旧自检只 `grep` 那个 plist 里有没有 `DYLD_INSERT_LIBRARIES` 字样 —— 文字一直在、库却从未加载，
+于是**长期假绿**（这一个故障藏了很久，症状一直是对端黑屏）。现判据（`bash uu.sh cpupath-status` 第 2 节）：
+
+1. 二进制依赖在位（`otool -L`）
+2. 库文件在 App 内（`Contents/Frameworks/`）
+3. **当前 `UURemoteServer` 的 pid 在库日志里有加载记录** ← 最硬的一条
+
+第 3 节仍检查全局注入变量是否为空（非空 = 正在伤害系统）。
 
 ## 关于分辨率：为什么「调显示模式」救不了帧率（实测推翻的结论）
 

@@ -2,8 +2,8 @@
 
 让**没有 Metal 的老 Mac**（AMD pre-GCN，如 2011 Mac mini `Macmini5,2`）能用 UU 远程正常出画面。
 
-- 唯一入口：**`uu.sh`**（22 个子命令，`bash uu.sh help`）
-- 深水区技术手册：**`README.md`**（根因、四类 bug 的查证过程、目录结构）
+- 唯一入口：**`uu.sh`**（27 个子命令，`bash uu.sh help`）
+- 深水区技术手册：**`README.md`**（根因清单、各条真根因的查证过程与对照实验、目录结构）
 - 所有踩坑结论沉淀在技能 **`macos-remote-access`** —— 改动前必须 `skill_view` 读它
 
 本文件只放**路由 + 铁律**，不重复手册内容。
@@ -29,7 +29,7 @@ Before writing code:
 |---|---|---|---|
 | 第 1/3 道 | `patch_tool.py` | libstreamer 的三处磁盘补丁（Metal 门禁 / 编码器 / 低延迟 RC） | `sudo bash uu.sh cg-install` |
 | 第 2 道 | `shim/libuushim.c` | 帧源：用截图轮询顶替选不到的 CoreGraphics 采集器 | `sudo bash uu.sh shim-install` |
-| 第 4 道 | `cpupath/libuucpupath.c` | CPU 顶替 Metal 做「采集帧 → 编码器输入帧」的转换 | `bash uu.sh cpupath-install` |
+| 第 4 道 | `cpupath/libuucpupath.c` | CPU 顶替 Metal 做「采集帧 → 编码器输入帧」的转换 | `sudo bash uu.sh install`（库的部署与重签由 `shim-install` 一并做）|
 
 `sudo bash uu.sh install` = 全套（含重签名）。**UU 每次自动更新后重跑 install 即可**（版本自适应）。
 
@@ -179,6 +179,8 @@ Before writing code:
 - [ ] 验证真的跑过（`./init.sh` + 该工作项的验收命令），**有命令与输出为证**
 - [ ] 证据记入 `progress.md` 或 `feature_list.json` 的 `evidence` 字段
 - [ ] 端到端确认过（真连一次，不只看进程存活）
+- [ ] **客户端侧确认过** —— 主机侧「出帧 + 亮度非黑 + 设备在线」全绿**不等于**对端能看到画面；
+      本机自身无法验证客户端（无 Metal，客户端窗口渲染不出），**必须用另一台设备连一次**
 - [ ] 仓库仍可从标准启动路径 clean 重启（`./init.sh` 无 FAIL）
 - [ ] 改动已 commit，工作区干净
 
@@ -202,6 +204,10 @@ bash uu.sh watchdog --dry
 
 # UU 实际走了哪套采集器（手机连过一次后跑；应无 -3802、无 SCStream 报错）
 bash uu.sh verify
+
+# ★ 第 4 道门是否**真的加载**（「连上没画面」先查这个；配置在 ≠ 生效）
+bash uu.sh cpupath-status
+#   或直接：sudo vmmap $(pgrep -x UURemoteServer | head -1) | grep -c libuucpupath
 
 # 静态检查（本项目的 lint / compile）
 bash -n uu.sh && bash -n init.sh && bash -n test.sh
@@ -248,7 +254,8 @@ Before ending a session:
 | 版本自适应定位与打补丁 | `patch_tool.py` |
 | 帧源（截图轮询） | `shim/libuushim.c`（**唯一真源**，任何 dylib 由它编译） |
 | CPU 顶替 Metal 转换 | `cpupath/libuucpupath.c` |
-| 注入方式与持久化 | `uu.sh cpupath-install` / `cpupath-uninstall` / `cpupath-status` |
+| 注入方式与持久化 | **二进制级 `LC_LOAD_DYLIB`**（在 `uu.sh` 的 `sign_main` 3/5、4/5 步；库随 App 重签）—— 绝不再用环境变量（铁律 20）|
+| 第 4 道门安装/排查 | `uu.sh cpupath-install`（清历史注入+装运行时副本）/ `cpupath-status` / `cpupath-uninstall` |
 | 分辨率切换 | `tools/setmode.swift`（编译产物 `tools/setmode`） |
 | 看门狗规则 | `uu.sh` 的 `watchdog_main` |
 | 根因与实测结论 | `evidence/*.md` + `README.md` |
