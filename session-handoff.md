@@ -82,7 +82,7 @@ bash uu.sh status         # 项目运行态总览
   1. `grep -a "CopyTo" /tmp/uucpu.log | tail` —— 有没有 `★ 成功 … 回退=0`（帧转换是否在跑）
   2. `grep -a "出帧" /tmp/uushim.log | tail` —— 采集侧帧号是否增长、亮度是否非 0
   3. `bash uu.sh verify` —— UU 实际走的是哪套采集器（应无 `-3802`、无 SCStream 报错）
-  4. `bash uu.sh encoder-probe` —— 编码器/采集/RTP 三段栈帧痕迹
+  4. `bash uu.sh encoder` —— 编码器/采集/RTP 三段栈帧痕迹（= `tools/uu-encoder-probe.sh`）
   5. 若上面都正常 → 问题在**传输/客户端侧**：查 B5 的重复 server 是否是干扰源
 
 其他候选工作项：

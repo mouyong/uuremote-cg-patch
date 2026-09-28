@@ -552,3 +552,58 @@ XPC 拒绝 0、shim + cpupath 均实际加载。等真实客户端（手机）�
   `com.uuremote.daemon.peer`），**不是故障**，无需处理。
 - **客户端侧始终无法自动验证**：本机截图工具在 101 上受 TCC 限制（只截到壁纸）、
   101 的 ssh 会话无辅助访问权限 → **只能靠用户手机实测**。
+
+---
+
+## 2026-09-28 第五段：**客户端验证通过**（用户手机实测）+ 重复 server 收口（单实例监督）
+
+### 用户原话（决定性验收）
+
+> **看得到在线，出画面了。没错误。我手机连的，收口。**
+
+⇒ 「别的设备连上去没有画面」**已解决**。此前 11:25:48–11:29:00 那段 3.2 分钟会话（962 帧）
+确认就是用户手机连的（当时代理侧也在推流），与「我自己 CLI 测试」区分开了。
+
+同时这也补齐了历史上从未有过的**客户端侧判据**（此前所有 PASS 都只是主机侧判据）。
+
+### 收口：重复 server → 单实例监督
+
+**问题**：实测两个 UURemoteServer 同时存在（父=launchd 的是我们的，父=UURemoteService 的是 UU 的），
+两者监听同样的 UDP 端口。
+
+**关键机制（终于把两次矛盾的实测解释清楚）——「谁建的就谁补」**：
+
+| server 的父进程 | 死了谁来补 | 实测证据 |
+| --- | --- | --- |
+| `UURemoteService`（UU 建）| UU 自己，**约 3 秒**内重建 | 杀掉后 +3s 新进程已出现、+10s 设备回在线 |
+| `launchd`（本 LaunchAgent 建）| 本 LaunchAgent | 撤掉 agent 后杀它 → 150 秒无重建、一直离线 |
+
+**做法**：plist 不再直接跑 server，改跑一句检查：
+`if pgrep -qx UURemoteServer; then exit 0; fi; sleep 5; <再查一次>; exec <server>`
++ `KeepAlive{SuccessfulExit:false}`（只在非 0 退出时重启）+ `StartInterval 180`（定期兜底）。
+
+**顺带加的闸**：`server_agent_up` 现在**不在 server 在跑时 `kickstart -k`**
+（铁律 3：会当场把在串流的用户踢下线）；要强制重启须显式 `UU_SERVER_FORCE=1`。
+看门狗本来也只在「没有 server」时才调它（已核对代码）。
+
+### 验证（命令 + 结果）
+
+| 项 | 结果 |
+| --- | --- |
+| 迁移前 | 2 个 server（91012 父=launchd；91149 父=UURemoteService）|
+| `bash uu.sh server-up` 迁移后 | **1 个**（99675 父=UURemoteService）—— 单实例监督生效 |
+| plist 形态 | `plutil -lint` OK；检查行含 `sleep 5`；`KeepAlive{SuccessfulExit:false}` / `StartInterval 180` |
+| 不打断会话 | 迁移前后 server pid **不变**（99675）✔ |
+| 防重复 | `UU_SERVER_FORCE=1 bash uu.sh server-up` → 进程集**不变**（未新建重复）✔ |
+| 分支逻辑 | 无 server 时走 `exec` 分支 ✔ |
+| 设备在线 | `online = True`；UU agent 仍加载、启动正常 |
+
+**放弃的一条测试（如实记录）**：本想「停掉 UU 的 agent → 验证我们的监督独自把设备带回在线」，
+但 `launchctl bootstrap` 被**本机网关护栏**拦下（提示：不得换动词绕过）—— **遵从，未绕过**。
+该路径改由「分支逻辑 + （历史）直接 exec 形态同样能拉起 server」间接证明；
+真正的考验在下一次 `install`/`sign`（必然 pkill 全部 server）。
+
+### 仍未解（不影响功能）
+
+`UURemoteDaemon` 每 60 秒一次 XPC 拒绝 —— 已确认是**正常重连**
+（`XPC_ERROR_CONNECTION_INTERRUPTED` → `Re-initialization successful`），不是故障。

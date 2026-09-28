@@ -73,16 +73,21 @@ Before writing code:
 14. **`UURemoteServer` 是「设备在线」的载体 —— 它不在跑，别的设备看到的是离线。**
     症状是 `uuyc-cli device info` → `isOnline: false`、连接报 1001；`UURemoteService`/`Daemon`
     都正常在跑也没用（它们不负责上报在线）。
-    - **★ 2026-09-28 实测澄清（曾误判两次，以本段为准）**：
-      - **UU 只在「自身启动流程」里创建它**（父进程 = `UURemoteService`）：重启 UU App
-        或 kickstart `com.netease.uuremote.agent`，UU 会连 server 一起建起来。
-      - **但 server 中途死了，UU 不会补** —— 实测：撤掉我们的 LaunchAgent + 杀掉 server，
-        **150 秒内无任何重建、设备一直 `online=False`**。
-      - 所以 **我们的 LaunchAgent（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive）
-        是必需品**，别撤。撤了就是「设备离线」。
-      - 「重复 server」出现在 **UU App 重启之后**：Service 建了一个，我们的 KeepAlive 也建了一个。
-        判据：**父=launchd 的是我们的，父=UURemoteService 的是 UU 的**；两个都在时后者的
-        采集链路完整（见下）。
+    - **★ 2026-09-28 实测模型（曾误判两次，以本段为准）**：**谁建的就谁补。**
+      | server 的父进程 | 死了谁来补 |
+      |---|---|
+      | `UURemoteService`（UU 自己建的）| **UU 自己，约 3 秒内重建**（实测）|
+      | `launchd`（我们的 LaunchAgent 建的）| **本 LaunchAgent**（UU 不管别人的子进程）|
+      - 两个实测：① 杀掉 UU 的子进程 → 3 秒内重建、设备 10 秒内回在线；
+        ② 撤掉本 LaunchAgent + 杀它自己那个 → **150 秒无重建、设备一直离线**。
+      - ⇒ **本 LaunchAgent 是必需品**（安装/签名必然 `pkill`，得有人把设备带回在线），别撤。
+      - **出口 = 单实例监督**：plist 不直接跑 server，而是跑
+        `if pgrep -qx UURemoteServer; then exit 0; fi; sleep 5; if pgrep -qx UURemoteServer; then exit 0; fi; exec <server>`
+        + `KeepAlive{SuccessfulExit:false}` + `StartInterval 180`。
+        「有 server（不论谁建的）→ 退出」；都没有才 exec 起一个（exec 让 launchd 把真进程
+        当本 job 的进程，保留异常退出自愈）。`sleep 5` 是为了先让 UU 一步，减少抢建。
+      - **绝不在 server 在跑时 `kickstart -k`**（铁律 3：会当场把在串流的用户踢下线）——
+        `server_agent_up` 现在自带这道闸（要强制重启需显式 `UU_SERVER_FORCE=1`）。
     - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
     - 安装与签名流程必然要 `pkill` 它（文件被占用就签不了）→ **收尾必须补回来**
       （`server_agent_up`），否则就是「装了补丁反而连不上」，且日志无错、极难查。

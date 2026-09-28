@@ -1183,17 +1183,30 @@ EOT
 #   **UURemoteServer 就是「设备在线」的载体。** 它不在跑时，别的设备看这台机是
 #   **离线**（`uuyc-cli device info` → isOnline=false），连不上；进程在跑就一直在线。
 #
-#   而 UU 自己**不会**在需要时把它拉起来：实测杀掉 server 后观察 60 秒，
-#   UURemoteService 没有任何拉起动作，设备一直离线；只有人工启动才恢复
-#   （对照机 101 上 server 是常驻的，父进程 = UURemoteService）。
+#   UU **只在自身启动流程里**建它（父进程 = UURemoteService）；**且只盯自己的子进程** ——
+#   实测：杀掉 UU 的子进程，UU 约 3 秒内重建；而杀掉**我们**拉起的那个（父=launchd），
+#   UU 不管（撤掉本 LaunchAgent 后杀它 → 150 秒无任何重建、设备一直离线）。所以：
+#     · 父 = UURemoteService 的 server → 死了 UU 自己补；
+#     · 父 = launchd 的 server → 死了由**本 LaunchAgent** 补（这就是它存在的理由）。
 #
 #   麻烦在于：**shim-install 为了重签必然要 `pkill UURemoteServer`**（文件被占用就签不了），
 #   装完却没人负责把它带回来 —— 于是出现「装完补丁、设备反而离线」的假象，
 #   而日志里没有任何错误，非常难查。
 #
-#   所以：给 server 一个**自己的 LaunchAgent**（RunAtLoad + KeepAlive），
-#   由 launchd 托管 —— 登录即起、崩溃自起、与 UU 的其它组件解耦。
-#   安装收尾调 server_agent_up，看门狗也兜底调它。
+#   ⇒ 给 server 一个**自己的 LaunchAgent**（RunAtLoad + KeepAlive），由 launchd 托管：
+#     登录即起、异常退出自起、与 UU 的其它组件解耦。安装收尾与看门狗都调 server_agent_up。
+#
+# ★ 2026-09-28 收口：**单实例监督**（因为重复 server 会被 UU 自己的启动流程造出来）
+#   实测到两个 server 同时存在：UU 的 Service 建一个（父=UURemoteService）、
+#   本 LaunchAgent 的 KeepAlive 再建一个（父=launchd）。两者都监听同样的 UDP 端口 →
+#   互相抢资源，是「连上没画面」的可疑来源之一。
+#   现在 plist **不直接跑 server**，而是跑一句检查：
+#       `if pgrep -qx UURemoteServer; then exit 0; fi; exec <server>`
+#   - 已有 server（不论谁建的）→ 退出，不再造一个；
+#   - 一个都没有 → `exec` 起一个（exec 让 launchd 把**真进程**当本 job 的进程，
+#     从而保留「异常退出自动重启」）；
+#   - `KeepAlive` 用 `SuccessfulExit=false`（只在**非**正常退出时重启）→ 上面那个
+#     「正常退出」不会被反复拉起；再配 `StartInterval` 定期兜底检查一次。
 # ============================================================================
 
 server_agent_paths() {
@@ -1213,8 +1226,18 @@ server_agent_paths() {
   SA_SRV="$APP/Contents/Helpers/UURemoteServer"
 }
 
+# ---- server_agent_procs ---- 列出所有 server 及「谁拉起的」（收口后正常只有 1 个）
+server_agent_procs() {
+  local p pp nm
+  for p in $(pgrep -x UURemoteServer 2>/dev/null); do
+    pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    nm=$(ps -o comm= -p "${pp:-0}" 2>/dev/null | xargs basename 2>/dev/null)
+    printf 'pid=%s 父=%s(%s)\n' "$p" "${pp:-?}" "${nm:-?}"
+  done
+}
+
 # ---- server_agent_up ----
-# 用法: server_agent_up      # 幂等：没装就装、没跑就起、跑着的是旧二进制就换新
+# 用法: server_agent_up      # 幂等：没装就装、没跑就起、老形态 plist 就迁移成单实例监督
 server_agent_up() {
   server_agent_paths
   if [ ! -x "$SA_SRV" ]; then
@@ -1222,8 +1245,21 @@ server_agent_up() {
     return 1
   fi
 
-  if [ ! -f "$SA_PLIST" ] || ! grep -q "$SA_LABEL" "$SA_PLIST" 2>/dev/null; then
+  # ---- 生成 / 迁移 plist（单实例监督形态）----
+  # ★ 判据用「有没有那句完整检查」：老形态直接 exec server，迁移前 UU 的 Service
+  #   造出 server 后本 job 还会再建一个（重复进程抢同样端口）。形态不对就重写。
+  #   ★ 改这句话时必须同步改这里 —— 否则线上 plist 不会被迁移（这是判据）。
+  local SUP_LINE="if pgrep -qx UURemoteServer; then exit 0; fi; sleep 5; if pgrep -qx UURemoteServer; then exit 0; fi; exec"
+  local need_write=0
+  [ -f "$SA_PLIST" ] || need_write=1
+  grep -qF "$SUP_LINE" "$SA_PLIST" 2>/dev/null || need_write=1
+
+  if [ "$need_write" = "1" ]; then
     as_user mkdir -p "$SA_HOME/Library/LaunchAgents" 2>/dev/null || mkdir -p "$(dirname "$SA_PLIST")"
+    # ★ XML 里刻意不用 `>` 与 `&&`（pgrep 用 -q 代替重定向、用 `;` 代替 `&&`）——
+    #   否则要写成 &gt; / &amp;&amp;，很容易写错且 lint 不一定抓得到。
+    # ★ 那个 `sleep 5`：UU 的 Service 在自己子进程死掉后约 3 秒内会重建，
+    #   先让它一步，能显著减少「两个 server 同时被建出来」的抢建概率。
     cat > "$SA_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1233,12 +1269,21 @@ server_agent_up() {
   <string>$SA_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$SA_SRV</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>$SUP_LINE $SA_SRV</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StartInterval</key>
+  <integer>180</integer>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardErrorPath</key>
@@ -1251,6 +1296,20 @@ EOF
     # plist 属主必须是该用户，否则 launchd 会拒绝加载
     [ "$(id -u)" -eq 0 ] && chown "${SA_UID}:$(id -gn "$REAL_USER" 2>/dev/null || echo staff)" "$SA_PLIST" 2>/dev/null
     plutil -lint "$SA_PLIST" >/dev/null 2>&1 || { echo "  ！plist 语法错误：$SA_PLIST"; return 1; }
+    # ★ 改了 ProgramArguments 必须 unload + load —— kickstart -k 不会重读 plist（实测）。
+    as_user $LC unload -w "$SA_PLIST" 2>/dev/null || true
+  fi
+
+  # ---- 已有 server 就不重启它 ----
+  # ★ 铁律 3：只要还有 server 在跑就绝不 `kickstart -k` —— 那会当场把正在串流的用户踢下线。
+  #   收口后我们的职责只是「一个都没有时补一个」；强制重启需显式设 UU_SERVER_FORCE=1
+  #   （安装/签名流程本来就已经 pkill 过，走不到这里）。
+  if pgrep -x UURemoteServer >/dev/null 2>&1 && [ "${UU_SERVER_FORCE:-0}" != "1" ]; then
+    local nc; nc=$(pgrep -x UURemoteServer | wc -l | tr -d ' ')
+    ok "已有 UURemoteServer 在跑（${nc} 个）—— 不重启它（避免打断会话）"
+    server_agent_procs | sed 's/^/    /'
+    [ "$nc" -gt 1 ] && echo "    ！多于 1 个：UU 的 Service 也建了一个（单实例监督不会再补第三个）"
+    return 0
   fi
 
   # 已加载就 kickstart -k（先杀后起 → 保证跑的是刚签好的新二进制）；
@@ -1269,7 +1328,11 @@ EOF
     sleep 1
   done
   if pgrep -x UURemoteServer >/dev/null 2>&1; then
-    ok "UURemoteServer 在跑（LaunchAgent 托管，pid=$(pgrep -x UURemoteServer | head -1)）—— 设备可被连接"
+    local n; n=$(pgrep -x UURemoteServer | wc -l | tr -d ' ')
+    ok "UURemoteServer 在跑（${n} 个，单实例监督托管）—— 设备可被连接"
+    server_agent_procs | sed 's/^/    /'
+    # 单实例监督生效时，另一个 server 只会来自 UU 自己的启动流程
+    [ "$n" -gt 1 ] && echo "    ！多于 1 个：UU 的 Service 也建了一个（本工具不会再补第三个）"
     return 0
   fi
   echo "  ！server 未起来（设备会显示离线）"
@@ -1289,13 +1352,23 @@ server_agent_status() {
   server_agent_paths
   local dom="$SA_DOM"
   echo "  LaunchAgent: $SA_PLIST $([ -f "$SA_PLIST" ] && echo '（已装）' || echo '（未装）')"
+  if [ -f "$SA_PLIST" ]; then
+    if grep -q "pgrep -qx UURemoteServer" "$SA_PLIST" 2>/dev/null; then
+      echo "  形态: 单实例监督（已有 server 就不再建）✔"
+    else
+      echo "  形态: 老形态（直接 exec server）→ 会与 UU 自建的 server 重复；跑 bash uu.sh server-up 迁移"
+    fi
+  fi
   if as_user $LC print "$dom/$SA_LABEL" >/dev/null 2>&1; then
     echo "  加载状态: 已加载（域 ${dom}）"
   else
     echo "  加载状态: 未加载"
   fi
-  if pgrep -x UURemoteServer >/dev/null 2>&1; then
-    echo "  进程: 在跑 pid=$(pgrep -x UURemoteServer | head -1) → 设备应显示**在线**"
+  local n; n=$(pgrep -x UURemoteServer 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$n" -ge 1 ]; then
+    echo "  进程: 在跑 ${n} 个 → 设备应显示**在线**"
+    server_agent_procs | sed 's/^/    /'
+    [ "$n" -gt 1 ] && echo "    ！多于 1 个（UU 的 Service 也建了一个）—— 单实例监督不会再补第三个"
   else
     echo "  进程: 不在跑 → 设备会显示**离线**（连不上）"
   fi
