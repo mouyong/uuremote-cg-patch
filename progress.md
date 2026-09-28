@@ -450,3 +450,63 @@ UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 bash uu.sh sign
 - 反汇编定位手法留档：`otool -tvV -arch x86_64` + literal pool 注释定位 Swift 字符串
   → 找 `SecCodeCheckValidity` 调用点 → 反查其调用者得到校验链。
 
+
+---
+
+## 2026-09-28 第三段：第 4 道门（cpupath）从 04:28 起就没加载 —— 「配置在、库没加载」的假绿
+
+### 症状与定位
+
+用户原话：**「刚启动软件的时候有网络，启动一会儿之后就变成连不上」** + 手机连上没画面。
+
+逐秒记录 GUI 连接数复现了「有网络 → 掉线」：启动 0 秒 = 4 条连接（代理 3 条 + UU 服务器 1 条），
+74 秒后掉到 1 条。但界面报的「无法连接至服务器 1001」实为**「108 作为控制端去连 MacBook Air」**
+那条会话的状态，与「被控端」无关（断开后 XPC 报错归零）。
+
+真正的硬证据在 `cpupath` 的自建日志：**`/tmp/uucpu.log` 最后一条是 04:28:56**，
+此后 4.5 小时零加载（同期 shim 一直在正常加载）。而第 4 道门负责
+**「采集帧 → 编码器输入帧」**（`IOSurfaceFrame::CopyTo(VideoFrame&)`，原实现走 Metal）——
+无 Metal 的机器上它不生效 → 编码器收不到帧 → **对端永远黑屏 / 卡在「正在传输画面」**。
+
+### 根因（两层）
+
+1. **注入路线本身失效**：cpupath 原来靠「往 UU 官方 plist
+   `/Library/LaunchAgents/com.netease.uuremote.agent.plist` 写 `DYLD_INSERT_LIBRARIES`」注入。
+   实测：该 plist 里确实有那行，但 `launchctl print gui/$U/com.netease.uuremote.agent` 的
+   environment 里**没有**该变量 → 库一个进程都没加载。
+   （另：目标进程带 hardening runtime 时会整个忽略 `DYLD_*`。）
+2. **自检是假绿**：旧自检只查「plist 里有没有那行文字」→ 一直显示正常，
+   所以这个故障**从来没被发现**，症状被一路记成「对端黑屏」。
+
+### 修复
+
+- 第 4 道门改走**二进制级注入**，与 shim 完全同一机制：
+  库随 App 部署到 `Contents/Frameworks/`，并给 `UURemoteServer` 加一条
+  `LC_LOAD_DYLIB → @loader_path/../Frameworks/libuucpupath.dylib`，之后重签整包。
+  `sign_main` 的 3/5、4/5 步现在同时装两个库（各自幂等，互不影响）。
+- **清掉失效的旧注入**：`cpupath-install` 第 2 步把 UU plist 里的 `DYLD_INSERT_LIBRARIES` 删掉。
+- **自检改成查实际加载**：判据 = 当前 `UURemoteServer` 的 pid 在 `/tmp/uucpu.log` 里有加载记录；
+  登录复核脚本 `apply.sh` 也改成只读核对「二进制依赖 + 库文件 + 实际加载记录」。
+
+### 验证（成对测试）
+
+| 项 | 结果 |
+| --- | --- |
+| 注入前 | 二进制依赖 0 条、vmmap 命中 0 |
+| 注入后 | 依赖 2 条（shim + cpupath）、vmmap 命中 4 |
+| 库日志 | `[51374] === libuucpupath 已加载` + `★ vtable 槽替换 2 处 → CPU 转换路径启用` |
+| 安装流程演练（副本） | 幂等路径 ✔ / 首次安装路径（用无依赖的原始 server）✔ |
+| 自检注入测试 | 正常 → 绿；把加载日志移走 → **精确变红**；恢复 → 绿 |
+
+### 顺带纠正的两条旧结论
+
+- **铁律 14 更正**：权限 bug 修好后，UU 的 Service **会自己把 `UURemoteServer` 拉起来**
+  （新进程父进程 = `UURemoteService`）。正常形态是**一个** server；出现「父=launchd」的那个
+  就是我们的 LaunchAgent 造的重复进程（同时监听同样的 UDP 端口）。
+- 「`UURemoteDaemon` 每 5 秒被拒一次」与重复 server **无关**（撤掉重复 server 后依旧），
+  属另一条独立线索，尚未定位（不影响被控链路）。
+
+### 当前状态
+
+单 server（父=UURemoteService）、设备在线、GUI 权限齐全（`audio-input` + `bluetooth`）、
+XPC 拒绝 0、shim + cpupath 均实际加载。等真实客户端（手机）验证画面。

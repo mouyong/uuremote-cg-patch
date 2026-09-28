@@ -71,7 +71,15 @@ Before writing code:
 14. **`UURemoteServer` 是「设备在线」的载体 —— 它不在跑，别的设备看到的是离线。**
     症状是 `uuyc-cli device info` → `isOnline: false`、连接报 1001；`UURemoteService`/`Daemon`
     都正常在跑也没用（它们不负责上报在线）。
-    - **UU 不会自己把它拉起来**：实测杀掉后等 60 秒无任何拉起动作，只有人工启动才恢复。
+    - **★ 2026-09-28 更正：「UU 不会自己拉起它」只在权限 bug 存在时成立。**
+      权限修好后（见第 18 条）实测：杀掉 server，**UU 的 Service 自己就把它拉回来了**
+      （新进程父进程 = `UURemoteService`），设备保持在线。所以：
+      - 正常形态是**一个** server、父进程是 `UURemoteService`；
+      - 若同时存在「父=launchd」的那个，就是我们的 LaunchAgent 造的**重复进程**。
+    - 做法：安装/签名必做的 `pkill` 之后，**优先让 UU 自己恢复**（重启 UU 或 kickstart
+      `com.netease.uuremote.agent`）；我们的 LaunchAgent 只当兜底，
+      **确认 UU 能自己拉起后就别再常驻**，否则多一个 server 同时监听同样的端口。
+    - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
     - 而**安装与签名流程必然要 `pkill` 它**（文件被占用就签不了）→ 不补回来就是
       「装了补丁反而连不上」，且日志无错、极难查。
     - 所以：给它一个**自己的 LaunchAgent**（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive），
@@ -120,6 +128,20 @@ Before writing code:
       `UURT_APP=<App副本> UURT_REHEARSE=1 bash uu.sh sign` → 输出里必须出现
       `+ 权限：com.apple.security.device.audio-input,com.apple.security.device.bluetooth`（GUI）。
     - 排查口诀：**G（GUI）权限空、S（Service）每 3 秒拒** → 先查权限集，别去猜网络/代理。
+19. **「自检查的是配置文本」= 假绿 —— 一律改成查「实际加载/实际生效」的证据。**
+    本项目踩过两次同型坑：① 第 4 道门（cpupath）的自检只查「UU 官方 plist 里有没有那行
+    `DYLD_INSERT_LIBRARIES`」——文字在、库一个进程都没加载，于是**长期显示正常**，
+    而症状一直是对端黑屏；② 早前 `uu-traffic.sh` 的读数归因错误。
+    规则：验证脚本必须回答「**东西真的生效了吗**」，而不是「我写下的配置还在吗」：
+    - 注入类 → 查 `vmmap <pid> | grep <lib>`、或库自己打的加载日志里**当前 pid** 的记录；
+    - 环境变量类 → 查**目标进程**的 `ps eww`，不查 plist；
+    - 判据要能在「故意破坏」时变红（成对测试），否则等于没有判据。
+20. **环境变量注入（`DYLD_INSERT_LIBRARIES`）在本项目已废弃 —— 一律走二进制级 `LC_LOAD_DYLIB`。**
+    原因：目标进程带 hardening runtime（`flags=0x10000(runtime)`）时会**整个忽略 `DYLD_*`**；
+    换成写 launchd plist 也不行 —— launchd 的 job 环境里实测拿不到该变量
+    （`launchctl print gui/…/com.netease.uuremote.agent` 的 environment 里没有它）。
+    二进制级注入不依赖环境变量、不受启动方式限制，且能直接验证加载。
+    `sign_main` 的 3/5、4/5 步现在同时装 shim 与 cpupath（各自幂等）。
 
 ## Working Rules（工作规则）
 
