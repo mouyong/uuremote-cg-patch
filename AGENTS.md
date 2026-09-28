@@ -159,6 +159,13 @@ Before writing code:
     做法：文档里的命令**原样复制自实跑**；预期输出**逐字粘贴真实输出**，并标注易混淆的对照行。
     子命令引用已由 `init.sh` 机器检查覆盖；**输出文字没有机器检查 → 只能靠实跑**。
 
+22. **本仓库是公开的（PUBLIC）—— 内网 IP、家目录、云服务器 IP 一律用占位符，绝不许写回真值。**
+    已用的占位约定（与既有写法保持一致）：`<VPN_IP>` / `<VPN_SUBNET>` / `<LAN_IP>` /
+    `<CLOUD_IP>` / `<PUBLIC_PEER_IP>` / `/Users/<user>` / `<DEVICE_ID>`。
+    2026-09-28 已用 `git filter-repo` **重写全部历史**把早前写进去的真值清掉（53 个提交、
+    内容零损失）。**看到占位符不要去"补全"** —— 那不是缺信息，是刻意的。
+    新增文档先自查：任何 `x.x.x.x` 形态的串都不该进仓库（本机 IP 段见 `~/.hermes/ENVIRONMENT.md`，不在此处复述）。
+
 ## Working Rules（工作规则）
 
 - **One feature at a time（一次只做一个）**：从 `feature_list.json` 挑**恰好一个**未完成工作项
