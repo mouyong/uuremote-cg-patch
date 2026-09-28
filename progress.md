@@ -510,3 +510,45 @@ UURT_APP=/tmp/dry/UURemote.app UURT_REHEARSE=1 bash uu.sh sign
 
 单 server（父=UURemoteService）、设备在线、GUI 权限齐全（`audio-input` + `bluetooth`）、
 XPC 拒绝 0、shim + cpupath 均实际加载。等真实客户端（手机）验证画面。
+
+---
+
+## 2026-09-28 第四段：日志时间戳加日期（v18）+ 铁律 14 第三次修正 + 端到端复验
+
+### 改了什么
+
+1. **shim → v18、cpupath 同步：日志时间戳加日期**。
+   原先只打 `HH:MM:SS`，而日志文件**跨天累积** → 排查时把**前一天**的行当成今天的
+   （本段真实踩到：一度据此得出「cpupath 正在工作」的错误结论）。现格式 `YYYY-MM-DD HH:MM:SS.mmm`。
+   - 连带修 `init.sh` 的 `cut -c1-8`（按位置截时间）→ `cut -c1-19`；其余解析都是模式匹配，不受影响。
+2. **铁律 14 第三次修正（这次以实测为准）**：先写成「UU 会自己拉起 server」，
+   随后实验推翻 —— 撤掉我们的 LaunchAgent + 杀掉 server 后，**150 秒内无重建、设备持续离线**。
+   准确表述：
+   - UU **只在自身启动流程里**建 server（父=`UURemoteService`）；
+   - server **中途死了 UU 不补** → **我们的 LaunchAgent 是必需品**；
+   - 重复 server 出现在 **UU App 重启之后**（Service 建一个、KeepAlive 再建一个）。
+3. **铁律 1 收口**：删掉「写进 UU plist 注入」这条过时指引，指向铁律 20（二进制级注入）。
+
+### 验证（命令 + 结果）
+
+| 项 | 结果 |
+| --- | --- |
+| 编译 | `clang … -o shim/libuushim.dylib`（五个 framework）✔；cpupath ✔ |
+| 版本标记 | 部署库内 `libuushim v18` ✔；日志出现 `2026-09-28 11:16:40  === libuushim v18 已加载` ✔ |
+| `sudo bash uu.sh sign` | 退出码 0；两个库均已在 App 内、两条 LC_LOAD_DYLIB 在位、GUI 权限齐全 |
+| `sudo bash uu.sh shim-install` | 退出码 0；`✔ libuushim.dylib (37472)`、`✔ libuucpupath.dylib (19168)`、依赖幂等 |
+| `./init.sh` | **✔ 全部通过**（26 个工作项；全局注入为空） |
+| `./test.sh` | **PASS ✔** 全 15 条（出帧 +5、亮度 29.0、回调 308/308 排空、无异常行） |
+| cpupath 实转 | `CopyTo #720 ★ 成功 2160000 字节（成功=720 回退=0）` ✔ |
+| 缓冲记账 | 会话中 `1 / 27.5MB` → stop 后 `0 / 0.0MB` ✔（v16 修复仍有效） |
+
+### 待办 / 未解
+
+- **重复 server**：我们的 LaunchAgent 与 UU 的 Service 各自建一个（实测 11:20:17 / 11:22:35）。
+  两者都带我们的补丁库，暂未证明有害；但「正常形态应该只有一个」。
+  若要收口，需把 LaunchAgent 改成「已有 server 就不建」的监督脚本 —— **系统级改动，须用户拍板**。
+- **`UURemoteDaemon` 每 60 秒一次 XPC 拒绝**：已确认是**正常重连**（Service 连 daemon
+  → `XPC_ERROR_CONNECTION_INTERRUPTED` → `Re-initialization successful` → 转连
+  `com.uuremote.daemon.peer`），**不是故障**，无需处理。
+- **客户端侧始终无法自动验证**：本机截图工具在 101 上受 TCC 限制（只截到壁纸）、
+  101 的 ssh 会话无辅助访问权限 → **只能靠用户手机实测**。

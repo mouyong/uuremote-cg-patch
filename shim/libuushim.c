@@ -112,7 +112,8 @@ static void ulog(const char *fmt, ...) {
     if (!lp || !*lp) lp = "/tmp/uushim.log";
     if (!g_log) g_log = fopen(lp, "a");
     if (g_log) {
-        fprintf(g_log, "%02d:%02d:%02d.%03d  %s\n",
+        fprintf(g_log, "%04d-%02d-%02d %02d:%02d:%02d.%03d  %s\n",
+                tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000), buf);
         fflush(g_log);
     }
@@ -122,7 +123,7 @@ static void ulog(const char *fmt, ...) {
 
 __attribute__((constructor)) static void uushim_init(void) {
     g_dump_path = getenv("UUSHIM_DUMP");   // ★ v17 调试：非空则把抓到的画面导出 BMP
-    ulog("=== libuushim v17 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】+ v16 修两处真泄漏（让出槽位/超时回收只摘映射不释放缓冲，每处 ~28MB 显存）并加缓冲记账 + **v17 加 UUSHIM_DUMP 画面导出（人工核对「抓到的画面对不对」——这是判断「连上没画面」是采集侧还是传输侧的关键证据）**；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
+    ulog("=== libuushim v18 已加载 pid=%d（v9 排空 + v10 Stopped 回调 + v11 关 VT 拦截 + v12 槽位/内存回收【修反复切换连不上】+ v13 空转/无缓冲守卫与分配重试【修内存紧张时黑屏+空载烧CPU】+ v14 失败会话即时让出槽位【修槽位累积泄漏致黑屏】+ v15 如实报告画面变化【静止帧不编码，省 CPU；UUSHIM_DIRTY=0 可退回恒整屏】+ v16 修两处真泄漏（让出槽位/超时回收只摘映射不释放缓冲，每处 ~28MB 显存）并加缓冲记账 + v17 加 UUSHIM_DUMP 画面导出（人工核对「抓到的画面对不对」——这是判断「连上没画面」是采集侧还是传输侧的关键证据）+ **v18 日志时间戳加日期（原先只有 HH:MM:SS、跨天累积 → 会把前一天的行误当今天，实测踩过）**；帧率可 UUSHIM_FPS 覆盖，当前 %d）===", (int)getpid(), UUSHIM_TARGET_FPS);
 }
 
 // ---------------------------------------------------------------------------

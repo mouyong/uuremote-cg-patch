@@ -215,7 +215,8 @@ else
 fi
 # 出帧证据：看一眼 shim 日志最近有没有出帧（没人在连时无帧是正常的）
 if [ -f /tmp/uushim.log ]; then
-  LFT="$(grep -a '出帧 #' /tmp/uushim.log 2>/dev/null | tail -1 | cut -c1-8 || true)"
+  # ★ v18 起日志前缀是「YYYY-MM-DD HH:MM:SS.mmm」（原先只有 HH:MM:SS，跨天会误读）
+  LFT="$(grep -a '出帧 #' /tmp/uushim.log 2>/dev/null | tail -1 | cut -c1-19 || true)"
   [ -n "$LFT" ] && echo "         shim 最近出帧时间: ${LFT}（无会话时不刷新属正常）"
 fi
 

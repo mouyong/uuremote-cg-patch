@@ -54,7 +54,8 @@ static void L(const char *fmt, ...) {
     char buf[1024];
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
     struct tm tm; localtime_r(&ts.tv_sec, &tm);
-    int n = snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03ld [%d] ",
+    int n = snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d.%03ld [%d] ",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                      tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec/1000000, getpid());
     va_list ap; va_start(ap, fmt);
     n += vsnprintf(buf+n, sizeof buf - n - 2, fmt, ap);

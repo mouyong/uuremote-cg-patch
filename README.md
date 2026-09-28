@@ -585,11 +585,18 @@ generativeexperiencesd 等系统守护进程；**连 `pgrep`、`screencapture` �
 **改 plist 后如何让 launchd 重读**：`launchctl unload` 然后 `launchctl load -w`。
 **`launchctl kickstart -k` 不会重读 plist** —— 实测新进程拿不到新环境变量 → 注入丢失 → 黑屏。
 
-**UU 升级会覆盖该 plist** → 由 `~/Library/LaunchAgents/com.uuremote-cg-patch.cpupath.plist`
-在每次登录时幂等复核并补回（`~/Library/Application Support/UUCpuPath/apply.sh`，
-日志 `apply.out.log`）。
+**★ 2026-09-28 更新（此段原描述已失效，务必读完）**：上述「收窄到 UU 自己的 plist」这条路
+**实测同样失效** —— launchd 的 job 环境里拿不到该变量
+（`launchctl print gui/$UID/com.netease.uuremote.agent` 的 `environment` 里没有它），
+库一个进程都没加载（`vmmap` 命中 0）。而旧自检只查 plist 文本 → **长期假绿**。
 
-**自查**：`bash uu.sh cpupath-status` 第 3 节会明确检查全局变量是否为空（非空 = 正在伤害系统）。
+**现行走法：二进制级注入** —— 库与 shim 一样部署进 `Contents/Frameworks/`，
+给 `UURemoteServer` 加一条 `LC_LOAD_DYLIB → @loader_path/../Frameworks/libuucpupath.dylib`，
+随后重签整包（`sudo bash uu.sh shim-install`）。不依赖环境变量、不受启动方式限制。
+
+**自检也换了判据**（`bash uu.sh cpupath-status` 第 2 节）：不再看 plist 文字，
+而是核对「二进制依赖在位 + 库文件在 App 内 + **当前 server 进程有实际加载记录**」。
+第 3 节仍检查全局变量是否为空（非空 = 正在伤害系统）。
 
 ## 关于分辨率：为什么「调显示模式」救不了帧率（实测推翻的结论）
 

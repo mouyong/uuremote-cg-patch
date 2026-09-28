@@ -39,8 +39,10 @@ Before writing code:
    所有进程（含系统守护进程、`pgrep`、`screencapture`）都会去加载我们的**未签名** dylib，
    被 macOS 的 CODESIGNING 保护直接 SIGKILL。
    实测代价：**一天 141 份系统进程崩溃报告**（前一日 1 份）、系统卡顿、System Settings 打不开。
-   正确做法：写进 **UU 自己的** LaunchAgent plist 的 `EnvironmentVariables`（见 `uu.sh cpupath-install`）。
    给 dylib 做 ad-hoc 签名**不能**避免此崩溃（实测无效）。
+   **★ 2026-09-28 更正：连「写进 UU 自己的 LaunchAgent plist」这条路也已废弃** ——
+   实测 launchd 的 job 环境里拿不到该变量，库一个进程都没加载（详见铁律 20）。
+   现在的唯一做法：**二进制级 `LC_LOAD_DYLIB` + 重签**（`uu.sh sign` 的 3/5、4/5 步）。
 2. **改完 plist 必须 `launchctl unload` + `load -w`** —— **`kickstart -k` 不会重读 plist**（实测会丢注入 → 黑屏）。
 3. **看门狗铁律：只要还在正常出帧就绝不动它**。会话进行中重启 server = 当场把用户踢下线。
    只在**空闲**（无帧 >60s）且 RSS 高时回收内存；RSS >3500MB 才是硬顶。
@@ -71,20 +73,21 @@ Before writing code:
 14. **`UURemoteServer` 是「设备在线」的载体 —— 它不在跑，别的设备看到的是离线。**
     症状是 `uuyc-cli device info` → `isOnline: false`、连接报 1001；`UURemoteService`/`Daemon`
     都正常在跑也没用（它们不负责上报在线）。
-    - **★ 2026-09-28 更正：「UU 不会自己拉起它」只在权限 bug 存在时成立。**
-      权限修好后（见第 18 条）实测：杀掉 server，**UU 的 Service 自己就把它拉回来了**
-      （新进程父进程 = `UURemoteService`），设备保持在线。所以：
-      - 正常形态是**一个** server、父进程是 `UURemoteService`；
-      - 若同时存在「父=launchd」的那个，就是我们的 LaunchAgent 造的**重复进程**。
-    - 做法：安装/签名必做的 `pkill` 之后，**优先让 UU 自己恢复**（重启 UU 或 kickstart
-      `com.netease.uuremote.agent`）；我们的 LaunchAgent 只当兜底，
-      **确认 UU 能自己拉起后就别再常驻**，否则多一个 server 同时监听同样的端口。
+    - **★ 2026-09-28 实测澄清（曾误判两次，以本段为准）**：
+      - **UU 只在「自身启动流程」里创建它**（父进程 = `UURemoteService`）：重启 UU App
+        或 kickstart `com.netease.uuremote.agent`，UU 会连 server 一起建起来。
+      - **但 server 中途死了，UU 不会补** —— 实测：撤掉我们的 LaunchAgent + 杀掉 server，
+        **150 秒内无任何重建、设备一直 `online=False`**。
+      - 所以 **我们的 LaunchAgent（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive）
+        是必需品**，别撤。撤了就是「设备离线」。
+      - 「重复 server」出现在 **UU App 重启之后**：Service 建了一个，我们的 KeepAlive 也建了一个。
+        判据：**父=launchd 的是我们的，父=UURemoteService 的是 UU 的**；两个都在时后者的
+        采集链路完整（见下）。
     - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
-    - 而**安装与签名流程必然要 `pkill` 它**（文件被占用就签不了）→ 不补回来就是
-      「装了补丁反而连不上」，且日志无错、极难查。
-    - 所以：给它一个**自己的 LaunchAgent**（`com.uuremote-cg-patch.server`，RunAtLoad + KeepAlive），
-      由 launchd 托管；安装/签名的收尾、以及看门狗都要调 `server_agent_up`。
-    - 判断口诀：**设备离线先看 `pgrep -x UURemoteServer`**，别再从头查采集器/权限。
+    - 安装与签名流程必然要 `pkill` 它（文件被占用就签不了）→ **收尾必须补回来**
+      （`server_agent_up`），否则就是「装了补丁反而连不上」，且日志无错、极难查。
+    - **别把安装期间的多次重启当成「进程 churn 故障」**：一次 `install`/`sign` 会
+      `pkill` UU 与 server 数次，日志里短时间内出现多条「已加载」是正常的（曾据此误判）。
 15. **bash 的 `trap ... EXIT` 是「后者覆盖前者」，不是叠加。**
     本项目里 `sign_main` 内部会 `trap cleanup EXIT`；如果只在**顶层**再挂一条
     （例如「退出时停掉后台守护」），跑到 sign_main 就被覆盖掉了 ——
