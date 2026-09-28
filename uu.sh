@@ -1391,6 +1391,14 @@ TARGET="$APP/Contents/Helpers/UURemoteServer"
 BACKUP_DIR="$D/shim/backup"
 BACKUP="$BACKUP_DIR/UURemoteServer.orig"
 LOAD_PATH="@loader_path/../Frameworks/libuushim.dylib"
+# ★ 第 4 道门（CPU 顶替 Metal 帧转换）与 shim 走**同一套机制**装。
+#   2026-09-28 改：原先 cpupath 靠「往 UU 官方 plist 写 DYLD_INSERT_LIBRARIES」注入，
+#   该路线已实测失效（launchd 的 job 环境里拿不到该变量 → 库一个进程都没加载，
+#   而自检只看 plist 里有没有那行文字，于是长期「假绿」）。改走二进制级 LC_LOAD_DYLIB：
+#   不依赖环境变量、不受启动方式限制，且能看到「真的加载了吗」。
+CPUPATH_SRC="$D/cpupath/libuucpupath.dylib"
+CPUPATH_DST="$APP/Contents/Frameworks/libuucpupath.dylib"
+CPUPATH_LOAD_PATH="@loader_path/../Frameworks/libuucpupath.dylib"
 
 c_ok=$'\033[32m'; c_no=$'\033[31m'; c_hd=$'\033[1;36m'; c_off=$'\033[0m'
 
@@ -1491,20 +1499,39 @@ hd "3/5 部署补丁库 → Contents/Frameworks/"
 # ---------------------------------------------------------------------------
 cp "$SHIM_SRC" "$SHIM_DST" && ok "$(basename "$SHIM_DST")  ($(stat -f '%z' "$SHIM_DST") 字节)" \
   || { no "复制失败"; exit 1; }
+if [ -f "$CPUPATH_SRC" ]; then
+  cp "$CPUPATH_SRC" "$CPUPATH_DST" && ok "$(basename "$CPUPATH_DST")  ($(stat -f '%z' "$CPUPATH_DST") 字节)" \
+    || { no "复制失败"; exit 1; }
+else
+  echo "  ！ 找不到 ${CPUPATH_SRC} —— 跳过第 4 道门（CPU 帧转换）。"
+  echo "     编译：clang -dynamiclib -O2 -o cpupath/libuucpupath.dylib cpupath/libuucpupath.c \\"
+  echo "           -framework CoreVideo -framework CoreFoundation -framework IOSurface"
+fi
 
 # ---------------------------------------------------------------------------
 hd "4/5 给 UURemoteServer 加 LC_LOAD_DYLIB（不改机器码）"
 # ---------------------------------------------------------------------------
-if have_dylib "$TARGET"; then
-  ok "依赖已在（幂等跳过）"
-else
-  # IDB_BACKUP 让备份落在 App 外面 —— 包内留 .dylibbak 会污染 CodeResources
-  if IDB_BACKUP="$BACKUP" python3 "$D/tools/insert_dylib.py" --add "$TARGET" "$LOAD_PATH" 2>&1 | sed 's/^/  /'; then
-    have_dylib "$TARGET" && ok "依赖已写入：$LOAD_PATH" || { no "写入后校验失败"; exit 1; }
-  else
-    no "加依赖失败（空间不足？）"; exit 1
+# 两个库都用同一机制装；各自幂等（已在就跳过），互不影响。
+insert_one() {   # $1=展示名 $2=库路径（@loader_path 形式）
+  if have_dylib_path "$TARGET" "$2"; then
+    ok "$1：依赖已在（幂等跳过）"
+    return 0
   fi
+  # IDB_BACKUP 让备份落在 App 外面 —— 包内留 .dylibbak 会污染 CodeResources
+  if IDB_BACKUP="$BACKUP" python3 "$D/tools/insert_dylib.py" --add "$TARGET" "$2" 2>&1 | sed 's/^/  /'; then
+    have_dylib_path "$TARGET" "$2" && ok "$1：依赖已写入 $2" || { no "$1：写入后校验失败"; return 1; }
+  else
+    no "$1：加依赖失败（空间不足？）"; return 1
+  fi
+  return 0
+}
+have_dylib_path() { grep -qF "$2" <<<"$(otool -L "$1" 2>/dev/null)"; }
+insert_one "shim（截图轮询帧源）" "$LOAD_PATH" || exit 1
+if [ -f "$CPUPATH_DST" ]; then
+  insert_one "cpupath（CPU 帧转换）" "$CPUPATH_LOAD_PATH" || exit 1
 fi
+echo "  ── UURemoteServer 现有依赖 ──"
+otool -L "$TARGET" 2>/dev/null | grep -E "uushim|uucpupath" | sed 's/^/    /'
 # 兜底清理包内的备份残留（历史版本会写在 App 内部）
 if [ -f "$TARGET.dylibbak" ]; then
   rm -f "$TARGET.dylibbak" && echo "  已清理包内备份残留 $(basename "$TARGET").dylibbak"
@@ -1778,21 +1805,18 @@ xattr -c "$LIBDST" 2>/dev/null
 codesign -f -s - "$LIBDST" 2>/dev/null
 echo "   ${LIBDST}（$(stat -f%z "$LIBDST") 字节）"
 
-hd "2/6 把注入写进 UU 自己的 LaunchAgent（只对 UU 生效）"
-if [ ! -f "$UU_PLIST" ]; then
-    no "找不到 ${UU_PLIST} —— UU 未按标准方式安装？中止以免注入到错误位置"
-    exit 1
+hd "2/6 清理历史遗留的环境变量注入（该路线已废弃）"
+# ★ 2026-09-28 起 cpupath 改走**二进制级 LC_LOAD_DYLIB**（与 shim 同机制，见 sign_main 的 4/5 步）。
+#   原因：DYLD_INSERT_LIBRARIES 路线实测失效 —— launchd 的 job 环境里拿不到该变量，
+#   库一个进程都没被加载（而旧自检只看 plist 里那行文字，于是长期「假绿」）。
+#   旧注入留着既没用、又会让人误以为已装上，这里清掉。
+if [ -f "$UU_PLIST" ] && sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
+    sudo -n /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" "$UU_PLIST" 2>/dev/null
+    echo "   语法校验：$(sudo -n plutil -lint "$UU_PLIST" 2>&1)"
+    ok "已清掉旧的环境变量注入（本库改由二进制依赖加载）"
+else
+    ok "没有旧注入残留"
 fi
-# 改系统目录里的 plist 需要 sudo；无权限时明确报错，不要静默失败。
-sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$UU_PLIST" 2>/dev/null
-sudo -n /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:DYLD_INSERT_LIBRARIES $LIBDST" "$UU_PLIST" 2>/dev/null \
-  || sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string $LIBDST" "$UU_PLIST"
-if [ $? -ne 0 ]; then
-    no "写入失败（需要 sudo 权限）"
-    exit 1
-fi
-echo "   语法校验：$(sudo -n plutil -lint "$UU_PLIST" 2>&1)"
-sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -A2 EnvironmentVariables | sed 's/^/     /'
 
 hd "3/6 撤销历史遗留的全局注入（重要：它才是伤害系统的那个）"
 if [ -n "$(launchctl getenv DYLD_INSERT_LIBRARIES 2>/dev/null)" ]; then
@@ -1803,29 +1827,33 @@ else
 fi
 echo "   现在 DYLD_INSERT_LIBRARIES=[$(launchctl getenv DYLD_INSERT_LIBRARIES)]"
 
-hd "4/6 写登录时复核用的 LaunchAgent（UU 升级覆盖 UU plist 后自动补回）"
+hd "4/6 写登录时复核用的 LaunchAgent（核对「库是否真的加载了」）"
 mkdir -p "$(dirname "$PLIST")"
 cat > "$DEST_DIR/apply.sh" <<EOF
 #!/bin/bash
-# 登录时由 LaunchAgent 调用：幂等复核 UU 的 plist 里是否还有我们的注入。
-# ★ 这里**只改 UU 自己的 plist**，绝不调 launchctl setenv（全局变量会伤害系统进程）。
-UU_PLIST="$UU_PLIST"
-LIB="$LIBDST"
+# 登录时由 LaunchAgent 调用：核对第 4 道门是否**真的**在位。
+# ★ 只读检查，不改任何东西：改二进制必须重签整包（改完不签 = 被控端起不来），
+#   所以这里只报状态，让用户跑 sudo bash uu.sh sign。
+# ★ 为什么不查 plist 文本了：旧版查的是「UU 官方 plist 里有没有那行 DYLD_INSERT」——
+#   那行在、库却没加载（launchd 不给变量），于是长期假绿。现在查实际加载证据。
+APP="$APP"
+TARGET="\$APP/Contents/Helpers/UURemoteServer"
+LIB="\$APP/Contents/Frameworks/libuucpupath.dylib"
+CLOG="/tmp/uucpu.log"
 LOG="$DEST_DIR/apply.out.log"
-[ -f "\$LIB" ] || exit 0
-[ -f "\$UU_PLIST" ] || exit 0
-if sudo -n plutil -p "\$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
-    echo "\$(date '+%F %T') 注入仍在 UU plist 中，无需处理" >> "\$LOG"
-    exit 0
+TS="\$(date '+%F %T')"
+ok=1
+if ! otool -L "\$TARGET" 2>/dev/null | grep -q "libuucpupath"; then
+    echo "\$TS !! 二进制里没有 libuucpupath 依赖 —— 跑：sudo bash uu.sh sign" >> "\$LOG"; ok=0
 fi
-# UU 升级覆盖了 plist → 补回
-sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "\$UU_PLIST" 2>/dev/null
-sudo -n /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string \$LIB" "\$UU_PLIST" 2>/dev/null
-if sudo -n plutil -p "\$UU_PLIST" 2>/dev/null | grep -q "libuucpupath"; then
-    echo "\$(date '+%F %T') UU plist 被覆盖，已补回注入（下次 UU 重启生效）" >> "\$LOG"
-else
-    echo "\$(date '+%F %T') !! 补回失败（需要 sudo 权限），请手动运行 uu.sh cpupath-install" >> "\$LOG"
+if [ ! -f "\$LIB" ]; then
+    echo "\$TS !! 库文件缺失：\$LIB —— 跑：sudo bash uu.sh sign" >> "\$LOG"; ok=0
 fi
+SP=\$(pgrep -x UURemoteServer | head -1)
+if [ -n "\$SP" ] && ! grep -aq "已加载 pid=\$SP" "\$CLOG" 2>/dev/null; then
+    echo "\$TS !! 当前 server(pid=\$SP) 无加载记录 —— 重启 UU 后仍无，则跑：sudo bash uu.sh sign" >> "\$LOG"; ok=0
+fi
+[ "\$ok" = "1" ] && echo "\$TS OK：第 4 道门在位（二进制依赖 + 库文件 + 实际加载记录）" >> "\$LOG"
 exit 0
 EOF
 chmod +x "$DEST_DIR/apply.sh"
@@ -1864,44 +1892,46 @@ else
   echo "   ！复核用 LaunchAgent 未加载（下次登录仍会生效）"
 fi
 
-hd "5/6 让 UU 重读 plist 并生效"
-# ★ 必须 unload + load：kickstart 不会重读 plist（实测新进程拿不到新环境变量）。
-launchctl unload "$UU_PLIST" 2>/dev/null
-sleep 3
-launchctl load -w "$UU_PLIST" 2>/dev/null
-sleep 8
-NEWPID="$(pgrep -x UURemoteService | head -1 || true)"
-if [ -n "$NEWPID" ]; then
-    if ps eww "$NEWPID" 2>/dev/null | tr ' ' '\n' | grep -q DYLD_INSERT; then
-        ok "UU agent(pid=${NEWPID}) 已从 plist 取得注入"
-    else
-        no "UU agent 未取得注入（plist 可能未生效）"
-    fi
-fi
+hd "5/6 重启 UU（二进制依赖只有新进程才会加载）"
+# ★ 依赖在进程**启动时**由 dyld 读取 → 必须让 UU 重启；老进程不会凭空多出这个库。
+#   （旧版本这里是「让 UU 重读 plist」，那是环境变量路线的做法；路线二不需要任何环境变量。）
 if [ "$REHEARSE" != "1" ]; then
   sudo -u "$CP_USER" open -a UURemote 2>/dev/null || open -a UURemote 2>/dev/null || true
-  sleep 6
+  sleep 8
+else
+  echo "  演练模式：跳过重启"
+fi
+if otool -L "$APP/Contents/Helpers/UURemoteServer" 2>/dev/null | grep -q "libuucpupath"; then
+    ok "二进制依赖在位：@loader_path/../Frameworks/libuucpupath.dylib"
+else
+    no "二进制依赖不在位 —— 跑：sudo bash uu.sh sign"
 fi
 
-hd "6/6 验证"
-if grep -q "vtable 槽替换" /tmp/uucpu.log 2>/dev/null; then
-    ok "修复已生效"
-    grep -E "libuucpupath 已加载|vtable 槽替换" /tmp/uucpu.log 2>/dev/null | tail -2 | sed 's/^/     /'
+hd "6/6 验证（必须看到「当前 server 进程」的加载记录才算通过）"
+SP="$(pgrep -x UURemoteServer | head -1 || true)"
+if [ -z "$SP" ]; then
+    no "UURemoteServer 不在跑 —— 先 open -a UURemote"
+elif grep -aq "libuucpupath 已加载 pid=$SP" /tmp/uucpu.log 2>/dev/null; then
+    ok "第 4 道门在位：server(pid=$SP) 已加载本库"
+    grep -aE "libuucpupath 已加载|vtable 槽替换" /tmp/uucpu.log 2>/dev/null | tail -3 | sed 's/^/     /'
 else
-    echo "   ！未检测到生效记录，最近日志："
-    tail -5 /tmp/uucpu.log 2>/dev/null || echo "   （无日志）"
+    no "server(pid=$SP) 没有加载记录 —— 重启 UU 再试；仍无说明依赖没生效"
+    tail -3 /tmp/uucpu.log 2>/dev/null | sed 's/^/     /'
 fi
 echo
-echo "   当前加载本库的进程（应该只有 UU 系的）："
-sudo -n lsof -n 2>/dev/null | grep -i libuucpupath | awk '{print $1}' | sort -u | head -10 | sed 's/^/     /'
+echo "   当前映射了本库的进程："
+for P in $(pgrep -x UURemoteServer) $(pgrep -x UURemote) $(pgrep -x UURemoteService) $(pgrep -x UURemoteDaemon); do
+  C=$(sudo -n vmmap "$P" 2>/dev/null | grep -c libuucpupath)
+  [ "$C" != "0" ] && echo "     $(ps -o comm= -p "$P" | xargs basename)(pid=$P)"
+done
 
 echo
 echo "完成。"
-echo "  注入位置：$UU_PLIST 的 EnvironmentVariables（只对 UU 生效）"
-echo "  持久化：  ① 上述 plist（UU 升级会覆盖 → ② 补回）"
-echo "            ② ${PLIST}（登录时幂等复核，见 ${DEST_DIR}/apply.out.log）"
-echo "  依赖项：libstreamer.dylib 的磁盘补丁（Metal 门禁 / 低延迟 RC）需另行保持，"
-echo "          见 patch_tool.py + bash uu.sh cg-install；UU 自动更新会覆盖，需重跑。"
+echo "  加载方式：UURemoteServer 的 LC_LOAD_DYLIB（二进制级，不依赖环境变量）"
+echo "  库位置：  $APP/Contents/Frameworks/libuucpupath.dylib（随 App 一起重签）"
+echo "  持久化：  ${PLIST}（登录时只读复核「是否真的加载了」，见 ${DEST_DIR}/apply.out.log）"
+echo "  依赖项：  libstreamer.dylib 的磁盘补丁（Metal 门禁 / 低延迟 RC）需另行保持，"
+echo "            见 patch_tool.py + bash uu.sh cg-install；UU 自动更新会覆盖，需重跑。"
 }
 
 
@@ -1921,27 +1951,33 @@ echo "1) 运行时文件"
 if [ -f "$DEST_DIR/libuucpupath.dylib" ]; then
     ok "${DEST_DIR}/libuucpupath.dylib（$(stat -f%z "$DEST_DIR/libuucpupath.dylib") 字节, $(stat -f%Sm "$DEST_DIR/libuucpupath.dylib")）"
 else
-    no "未安装"
+    echo "   ！旧版运行时副本不存在（路线二已不使用它，不影响功能）"
+fi
+APPLIB="/Applications/UURemote.app/Contents/Frameworks/libuucpupath.dylib"
+TARGET="/Applications/UURemote.app/Contents/Helpers/UURemoteServer"
+if [ -f "$APPLIB" ]; then
+    ok "库已随 App 部署：${APPLIB}（$(stat -f%z "$APPLIB") 字节）"
+else
+    no "库里没进 App：${APPLIB} → sudo bash uu.sh sign"
 fi
 
 echo
-echo "2) 注入位置（正确做法：只在 UU 自己的 LaunchAgent plist 里）"
-if [ -f "$UU_PLIST" ]; then
-    UU_INJ="$(sudo -n plutil -p "$UU_PLIST" 2>/dev/null | grep -o 'libuucpupath[^"]*' | head -1)"
-    if [ -n "$UU_INJ" ]; then
-        ok "UU plist 已注入：${UU_INJ}"
-        UPID="$(pgrep -x UURemoteService | head -1 || true)"
-        if [ -n "$UPID" ] && ps eww "$UPID" 2>/dev/null | tr ' ' '\n' | grep -q DYLD_INSERT; then
-            ok "当前 UU agent(pid=${UPID}) 已取得该变量"
-        else
-            echo "   ！UU agent 进程里没有该变量（plist 改动尚未生效）→ bash uu.sh cpupath-install"
-        fi
-    else
-        no "UU plist 里没有注入（对端会黑屏）→ bash uu.sh cpupath-install"
-    fi
+echo "2) 加载方式（路线二：UURemoteServer 的 LC_LOAD_DYLIB —— 不依赖环境变量）"
+if otool -L "$TARGET" 2>/dev/null | grep -q libuucpupath; then
+    ok "二进制依赖在位：$(otool -L "$TARGET" 2>/dev/null | grep libuucpupath | awk '{print $1}')"
 else
-    no "找不到 ${UU_PLIST}（UU 未安装？）"
+    no "二进制里没有该依赖（对端会黑屏）→ sudo bash uu.sh sign"
 fi
+SP="$(pgrep -x UURemoteServer | head -1 || true)"
+if [ -n "$SP" ] && grep -aq "libuucpupath 已加载 pid=$SP" /tmp/uucpu.log 2>/dev/null; then
+    ok "★ 实际加载证据：当前 server(pid=${SP}) 已加载本库"
+    grep -a "vtable 槽替换" /tmp/uucpu.log 2>/dev/null | tail -1 | sed 's/^/     /'
+elif [ -n "$SP" ]; then
+    no "当前 server(pid=${SP}) 没有加载记录 → 重启 UU；仍无则 sudo bash uu.sh sign"
+else
+    echo "   ！UURemoteServer 不在跑，无法核对加载状态"
+fi
+echo "   （旧版这里查的是 UU plist 文本，属于假绿：文字在、库没加载。已改为查实际加载。）"
 
 echo
 echo "3) ★ 全局注入检查（必须为空 —— 非空会伤害整个系统）"
